@@ -949,7 +949,6 @@ function lockViewportZoom(){
   }, {passive:false});
 }
 function openNavDrawer(){
-  if(IS_ANDROID_WEBVIEW) return false;
   closeInfoPanels();
   closeProfileDrawer();
   document.body.classList.add('nav-open');
@@ -5274,7 +5273,10 @@ function updateMembershipAccessUi(record=getMembershipRecord(),status=membership
   const session=getMemberSession();
   const admin=isAdminSession();
   if(admin) setMembershipAuthMode('admin');
-  el('topbarLogoutBtn')?.classList.toggle('hidden', !(session?.active && !isGuestSession(session)));
+  const canLogout=!!(session?.active && !isGuestSession(session));
+  el('topbarLogoutBtn')?.classList.add('hidden');
+  el('navDrawerSession')?.classList.toggle('hidden', !canLogout);
+  el('navDrawerLogoutBtn')?.classList.toggle('hidden', !canLogout);
   el('homeManagementPanel')?.classList.toggle('hidden', !admin);
   el('membershipStatusPanel')?.classList.toggle('hidden', !admin);
   el('membershipAdminArea')?.classList.toggle('hidden', !admin);
@@ -6626,7 +6628,7 @@ function handleEdgeSwipeMove(event){
     edgeSwipeTracking=false;
     return;
   }
-  if(!IS_ANDROID_WEBVIEW && !document.body.classList.contains('nav-open') && dx>72){
+  if(!document.body.classList.contains('nav-open') && dx>72){
     openNavDrawer();
     edgeSwipeTracking=false;
     return;
@@ -6879,6 +6881,10 @@ document.addEventListener('click',event=>{
 if(el('memberLoginBtn')) el('memberLoginBtn').addEventListener('click',attemptMembershipLogin);
 if(el('memberLogoutBtn')) el('memberLogoutBtn').addEventListener('click',logoutMembershipSession);
 if(el('topbarLogoutBtn')) el('topbarLogoutBtn').addEventListener('click',logoutMembershipSession);
+if(el('navDrawerLogoutBtn')) el('navDrawerLogoutBtn').addEventListener('click',()=>{
+  closeNavDrawer();
+  logoutMembershipSession();
+});
 if(el('deleteMyDataBtn')) el('deleteMyDataBtn').addEventListener('click',requestDeleteMyData);
 if(el('guestLoginBtn')) el('guestLoginBtn').addEventListener('click',guestMembershipLogin);
 if(el('showLoginBtn')) el('showLoginBtn').addEventListener('click',focusMembershipLogin);
