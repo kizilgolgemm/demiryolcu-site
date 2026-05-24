@@ -49,6 +49,7 @@ const SALARY_FORM_STORAGE_KEY='tcdd_salary_form_v1';
 const EXCHANGE_REQUEST_KEY='tcdd_exchange_request_v1';
 const FORUM_DRAFT_KEY='tcdd_forum_draft_v1';
 const FORUM_NICK_KEY='tcdd_forum_nick_v1';
+const USER_SYNC_UPDATED_KEY='tcdd_user_sync_updated_v1';
 const HOME_ANNOUNCEMENT_KEY='tcdd_home_announcement_2026_04_29';
 const ANNOUNCEMENT_WELCOME_DISMISSED_KEY='tcdd_announcement_welcome_dismissed_v1';
 const PLATFORM_BULLETINS_STORAGE_KEY='tcdd_platform_bulletins_v1';
@@ -64,6 +65,7 @@ const MANEVRA_TAZMINATI_RATE_2026=143;
 const BEKLEME_TAZMINATI_RATE_2026=860;
 const RAMPA_TAZMINATI_RATE_2026=round2(BEKLEME_TAZMINATI_RATE_2026*(2/3));
 const POSTABASI_RATE_2026=4.84;
+const TASIMACILIK_MAY_2026_ODYL_DEDUCTION=1208.84;
 const WORK_SCHEDULE_MODELS={
   NORMAL_9:{label:'Normal 9 Saat',mode:'NORMAL',start:'07:00',end:'17:00',mealStart:'12:00',mealEnd:'13:00',creditedMultiplier:1},
   KAYNAKCI_7_5:{label:'Kaynakçı 7,5 / 45 Saat',mode:'NORMAL',start:'07:00',end:'15:30',mealStart:'12:00',mealEnd:'13:00',creditedMultiplier:1.2},
@@ -345,6 +347,13 @@ let leaveRangeStart='';
 let leaveRangeEnd='';
 let workRangeStart='';
 let workRangeEnd='';
+let userSyncTimer=0;
+let userSyncApplying=false;
+let userSyncLoading=false;
+let userSyncForceApply=false;
+
+const IS_ANDROID_WEBVIEW=!!window.AndroidBridge || !!(window.FirebaseBridge && typeof window.FirebaseBridge.isAvailable==='function' && window.FirebaseBridge.isAvailable());
+document.body.classList.toggle('android-webview', IS_ANDROID_WEBVIEW);
 
 function showSplash(autoHideMs=0){
   clearTimeout(splashHideTimer);
@@ -662,22 +671,44 @@ function formatPeriodLabel(period){
   const key=periodToMonthValue(period);
   return MONTH_LABELS[key] || key || '-';
 }
-function startProfilePeriod(profile=formProfile()){
+function rawHirePeriod(profile=formProfile()){
   const year=Number(profile?.girisYili||0);
   if(!year) return null;
   const month=Math.min(12, Math.max(1, Number(profile?.girisAy||1)));
-  const probationAdjusted=addMonthsToPeriod({year,month}, 3);
-  return profile?.militaryAfterStart==='var' ? addMonthsToPeriod(probationAdjusted, 12) : probationAdjusted;
+  return {year,month};
+}
+function profileProbationMonths(profile=formProfile()){
+  const raw=Number(profile?.probationMonths);
+  return Number.isFinite(raw) && raw>=0 ? raw : 4;
+}
+function normalizedMilitaryStatus(profile=formProfile()){
+  const status=String(profile?.militaryAfterStart||'yok');
+  return status==='var' ? 'after' : status;
+}
+function profileMilitaryDelayMonths(profile=formProfile()){
+  const raw=Number(profile?.militaryDelayMonths);
+  if(Number.isFinite(raw) && raw>=0) return raw;
+  return String(profile?.militaryAfterStart||'')==='var' ? 12 : 0;
+}
+function syncMilitaryDelayControls(){
+  if(!el('militaryAfterStart') || !el('militaryDelayMonths')) return;
+  if(sval('militaryAfterStart')==='yok') el('militaryDelayMonths').value='0';
+}
+function startProfilePeriod(profile=formProfile()){
+  const hire=rawHirePeriod(profile);
+  if(!hire) return null;
+  const delay=normalizedMilitaryStatus(profile)==='yok' ? 0 : profileMilitaryDelayMonths(profile);
+  return addMonthsToPeriod(hire, profileProbationMonths(profile) + delay);
 }
 function selectedSalaryPeriod(){
   return monthValueToPeriod(sval('month'));
 }
 function serviceYearsForMonth(monthValue, profile=formProfile()){
-  const base=startProfilePeriod(profile);
-  if(!base) return 0;
+  const hire=rawHirePeriod(profile);
+  if(!hire) return 0;
   const period=monthValueToPeriod(monthValue);
-  let years=period.year-base.year;
-  if(period.month>=base.month) years += 1;
+  let years=period.year-hire.year;
+  if(period.month>=hire.month) years += 1;
   return Math.max(0, years);
 }
 function nextPromotionPeriod(monthValue=sval('month'), profile=formProfile()){
@@ -690,12 +721,17 @@ function nextPromotionPeriod(monthValue=sval('month'), profile=formProfile()){
 function salaryMonthInfo(profile=formProfile()){
   const start=startProfilePeriod(profile);
   const resolvedStep=resolveProfileStep(sval('month'), profile);
+  const militaryStatus=normalizedMilitaryStatus(profile);
+  const militaryDelay=militaryStatus==='yok' ? 0 : profileMilitaryDelayMonths(profile);
   return {
     start,
     startLabel:start ? formatPeriodLabel(start) : '-',
     nextPromotion:nextPromotionPeriod(sval('month'), profile),
     nextPromotionLabel:formatPeriodLabel(nextPromotionPeriod(sval('month'), profile)),
     serviceYears:serviceYearsForMonth(sval('month'), profile),
+    probationMonths:profileProbationMonths(profile),
+    militaryStatus,
+    militaryDelayMonths:militaryDelay,
     resolvedStep,
     resolvedStepLabel:resolvedStep ? `${resolvedStep.degree} / ${resolvedStep.kademe}` : '-'
   };
@@ -729,14 +765,15 @@ function refreshProfileIndicators(){
   const base=Number(info.resolvedStep?.rate||0);
   const emekGross=round2(EMEK_ZAMMI_RATE * yrs);
   const hourlyTotal=round2(base + emekGross);
-  const hizmetGross=round2(hizmetUnit() * yrs);
+  const hizmetYears=hizmetYearsFromServiceYears(yrs);
+  const hizmetGross=round2(hizmetUnit() * hizmetYears);
   if(el('kpiBase')) el('kpiBase').textContent=money(base);
   if(el('kpiEmek')) el('kpiEmek').textContent=money(emekGross);
   if(el('kpiHourly')) el('kpiHourly').textContent=money(hourlyTotal);
   if(el('kpiServiceYears')) el('kpiServiceYears').textContent=String(yrs);
   if(el('profileEmekGross')) el('profileEmekGross').textContent=money(emekGross);
   if(el('profileHizmetGross')) el('profileHizmetGross').textContent=money(hizmetGross);
-  if(el('profileServiceYears')) el('profileServiceYears').textContent=String(yrs);
+  if(el('profileServiceYears')) el('profileServiceYears').textContent=String(hizmetYears);
   if(el('profileHourlyTotal')) el('profileHourlyTotal').textContent=money(hourlyTotal);
   if(el('profileEffectiveStart')) el('profileEffectiveStart').textContent=info.startLabel;
   if(el('profileCurrentStep')) el('profileCurrentStep').textContent=info.resolvedStepLabel;
@@ -764,6 +801,7 @@ function salaryFormData(){
 function saveSalaryForm(){
   try{
     localStorage.setItem(SALARY_FORM_STORAGE_KEY, JSON.stringify(salaryFormData()));
+    scheduleUserDataSync('salary');
   }catch(error){}
 }
 function migrateSalaryMay2026ReferenceDefaults(data={}){
@@ -911,11 +949,13 @@ function lockViewportZoom(){
   }, {passive:false});
 }
 function openNavDrawer(){
+  if(IS_ANDROID_WEBVIEW) return false;
   closeInfoPanels();
   closeProfileDrawer();
   document.body.classList.add('nav-open');
   el('navDrawerShell')?.setAttribute('aria-hidden','false');
   restartIdleTimer();
+  return true;
 }
 function closeNavDrawer(){
   document.body.classList.remove('nav-open');
@@ -1067,10 +1107,12 @@ function profiles(){
 function saveProfiles(list){
   profilesCache=Array.isArray(list) ? list : [];
   localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(profilesCache));
+  scheduleUserDataSync('profiles');
 }
 function setLastProfile(id){
   if(id) localStorage.setItem(LAST_PROFILE_KEY, id);
   else localStorage.removeItem(LAST_PROFILE_KEY);
+  scheduleUserDataSync('last-profile');
 }
 function getLastProfileId(){
   return localStorage.getItem(LAST_PROFILE_KEY) || '';
@@ -1088,6 +1130,7 @@ function leaveStore(){
 function saveLeaveStore(store){
   leaveStoreCache=store && typeof store==='object' ? store : {};
   localStorage.setItem(LEAVE_STORAGE_KEY, JSON.stringify(leaveStoreCache));
+  scheduleUserDataSync('leave');
 }
 function workLogStore(){
   if(workLogStoreCache && typeof workLogStoreCache==='object') return workLogStoreCache;
@@ -1102,6 +1145,112 @@ function workLogStore(){
 function saveWorkLogStore(store){
   workLogStoreCache=store && typeof store==='object' ? store : {};
   localStorage.setItem(WORK_LOG_STORAGE_KEY, JSON.stringify(workLogStoreCache));
+  scheduleUserDataSync('work');
+}
+function currentSyncUid(session=getMemberSession()){
+  return String(session?.firebaseUid || session?.uid || '').trim();
+}
+function canSyncUserData(){
+  const session=getMemberSession();
+  return !!(session?.active && !isGuestSession(session) && currentSyncUid(session));
+}
+function safeJsonParse(value,fallback){
+  try{
+    return value ? JSON.parse(value) : fallback;
+  }catch(error){
+    return fallback;
+  }
+}
+function userSyncPayload(reason='manual'){
+  return {
+    version:2,
+    reason,
+    updatedAt:Date.now(),
+    lastProfileId:getLastProfileId(),
+    profiles:profiles(),
+    salaryForm:safeJsonParse(localStorage.getItem(SALARY_FORM_STORAGE_KEY), {}),
+    leaveStore:leaveStore(),
+    workLogStore:workLogStore(),
+    forumNick:localStorage.getItem(FORUM_NICK_KEY) || '',
+    forumDraft:safeJsonParse(localStorage.getItem(FORUM_DRAFT_KEY), {}),
+    membership:{sicil:String(getMembershipRecord().sicil || ''), email:String(getMembershipRecord().email || '')}
+  };
+}
+function scheduleUserDataSync(reason='update'){
+  if(userSyncApplying || !canSyncUserData()) return false;
+  localStorage.setItem(USER_SYNC_UPDATED_KEY, String(Date.now()));
+  const bridge=firebaseBridge();
+  if(!bridge || typeof bridge.updateUserSyncData!=='function') return false;
+  clearTimeout(userSyncTimer);
+  userSyncTimer=window.setTimeout(()=>{
+    if(userSyncApplying || !canSyncUserData()) return;
+    try{
+      bridge.updateUserSyncData(JSON.stringify(userSyncPayload(reason)));
+    }catch(error){}
+  },850);
+  return true;
+}
+function loadUserDataSync(force=false){
+  if(userSyncLoading || !canSyncUserData()) return false;
+  const bridge=firebaseBridge();
+  if(!bridge || typeof bridge.loadUserSyncData!=='function') return false;
+  userSyncLoading=true;
+  userSyncForceApply=!!force;
+  try{
+    bridge.loadUserSyncData(force ? '1' : '');
+    return true;
+  }catch(error){
+    userSyncLoading=false;
+    userSyncForceApply=false;
+    return false;
+  }
+}
+function applyUserSyncData(payload={}, force=false){
+  const remoteUpdated=Number(payload.updatedAt || 0);
+  const localUpdated=Number(localStorage.getItem(USER_SYNC_UPDATED_KEY) || 0);
+  if(!remoteUpdated || (!force && remoteUpdated<localUpdated)) return;
+  userSyncApplying=true;
+  try{
+    if(Array.isArray(payload.profiles)){
+      profilesCache=payload.profiles;
+      localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(profilesCache));
+    }
+    if(payload.lastProfileId){
+      localStorage.setItem(LAST_PROFILE_KEY, String(payload.lastProfileId));
+    }
+    if(payload.salaryForm && typeof payload.salaryForm==='object'){
+      localStorage.setItem(SALARY_FORM_STORAGE_KEY, JSON.stringify(payload.salaryForm));
+    }
+    if(payload.leaveStore && typeof payload.leaveStore==='object'){
+      leaveStoreCache=payload.leaveStore;
+      localStorage.setItem(LEAVE_STORAGE_KEY, JSON.stringify(leaveStoreCache));
+    }
+    if(payload.workLogStore && typeof payload.workLogStore==='object'){
+      workLogStoreCache=payload.workLogStore;
+      localStorage.setItem(WORK_LOG_STORAGE_KEY, JSON.stringify(workLogStoreCache));
+    }
+    if(typeof payload.forumNick==='string' && payload.forumNick.trim()){
+      localStorage.setItem(FORUM_NICK_KEY, cleanForumNick(payload.forumNick));
+    }
+    if(payload.forumDraft && typeof payload.forumDraft==='object'){
+      localStorage.setItem(FORUM_DRAFT_KEY, JSON.stringify(payload.forumDraft));
+    }
+    localStorage.setItem(USER_SYNC_UPDATED_KEY, String(remoteUpdated));
+  }finally{
+    userSyncApplying=false;
+  }
+  restoreLastProfile();
+  restoreSalaryForm();
+  restoreForumDraft();
+  renderProfiles();
+  renderActiveProfileSummary();
+  renderLeaveModule();
+  renderWorkModule();
+  renderWorkModels();
+  fillCalendarInputs();
+  updateCalendarCards();
+  scheduleSalaryChange();
+  renderForum();
 }
 function currentProfileKey(){
   return currentProfileId || sval('sicil').trim() || '';
@@ -1182,6 +1331,7 @@ function workTypeLabel(type){
     vardiyaGece:'Vardiyalı Çalışma - Gece',
     haftaSonu:'Hafta Sonu / P.B.',
     tatil:'Tatil',
+    ubgt:'UBGT / Ulusal Bayram Genel Tatil',
     ucretliIzin:'Yıllık İzin',
     yillikIzin:'Yıllık İzin',
     gmsUcretli:'GMŞ Ücretli',
@@ -1198,6 +1348,7 @@ function workTypeShortLabel(type){
     vardiyaGece:'G',
     haftaSonu:'PB',
     tatil:'T',
+    ubgt:'UBGT',
     ucretliIzin:'Yİ',
     yillikIzin:'Yİ',
     gmsUcretli:'GMŞ',
@@ -1231,6 +1382,11 @@ function normalizeWorkEvent(payload){
     extraOvertime:round2(Number(payload.extraOvertime)||0),
     extraNight:round2(Number(payload.extraNight)||0),
     extraTrack:round2(Number(payload.extraTrack)||0),
+    extraUbgt:round2(Number(payload.extraUbgt)||0),
+    extraKm:round2(Number(payload.extraKm)||0),
+    extraRampa:round2(Number(payload.extraRampa)||0),
+    beklemeGun:round2(Number(payload.beklemeGun)||0),
+    beklemeAdet:Math.max(0, Math.floor(Number(payload.beklemeAdet)||0)),
     note:String(payload.note||'').trim()
   };
   entry.netHours=computeNetWorkHours(entry);
@@ -1240,7 +1396,7 @@ function workTypeTemplate(type=sval('workType')){
   const schedule=workScheduleModel();
   if(WORK_SHIFT_TEMPLATES[type]) return {...WORK_SHIFT_TEMPLATES[type]};
   if(type==='ucretliIzin' || type==='yillikIzin' || type==='gmsUcretli' || type==='sendikaTisIzin' || type==='ucretliRapor') return {start:schedule.start,end:schedule.end,mealStart:schedule.mealStart,mealEnd:schedule.mealEnd};
-  if(type==='haftaSonu' || type==='tatil' || type==='vardiya' || type==='normal') return {start:schedule.start,end:schedule.end,mealStart:schedule.mealStart,mealEnd:schedule.mealEnd};
+  if(type==='haftaSonu' || type==='tatil' || type==='ubgt' || type==='vardiya' || type==='normal') return {start:schedule.start,end:schedule.end,mealStart:schedule.mealStart,mealEnd:schedule.mealEnd};
   return {start:schedule.start,end:schedule.end,mealStart:schedule.mealStart,mealEnd:schedule.mealEnd};
 }
 function applyWorkTypeTemplate(type=sval('workType')){
@@ -1264,6 +1420,11 @@ function workFormPreviewEntry(){
     extraOvertime:nval('workOvertimeHours'),
     extraNight:nval('workNightHours'),
     extraTrack:nval('workTrackHours'),
+    extraUbgt:nval('workUbgtHours'),
+    extraKm:nval('workKmHours'),
+    extraRampa:nval('workRampaSefer'),
+    beklemeGun:nval('workBeklemeGun'),
+    beklemeAdet:nval('workBeklemeAdet'),
     note:sval('workNote')
   });
 }
@@ -1330,6 +1491,11 @@ function clearWorkForm(resetDate=false){
   el('workOvertimeHours').value='0';
   el('workNightHours').value='0';
   el('workTrackHours').value='0';
+  if(el('workUbgtHours')) el('workUbgtHours').value='0';
+  if(el('workKmHours')) el('workKmHours').value='0';
+  if(el('workRampaSefer')) el('workRampaSefer').value='0';
+  if(el('workBeklemeGun')) el('workBeklemeGun').value='0';
+  if(el('workBeklemeAdet')) el('workBeklemeAdet').value='0';
   el('workNote').value='';
   if(resetDate && el('workDate')) el('workDate').value=`${workSelectedMonth()}-01`;
   if(resetDate && el('workEndDate')) el('workEndDate').value=sval('workDate');
@@ -1356,10 +1522,15 @@ function workMonthSummary(profileId=currentProfileKey(), month=workSelectedMonth
     unionLeave:0,
     ucretliIzin:0,
     ucretliRapor:0,
+    ubgtFiili:0,
     vardiya:0,
     overtime:0,
     night:0,
     track:0,
+    kmSaat:0,
+    rampaSefer:0,
+    beklemeTotal:0,
+    beklemeAdet:0,
     total:0
   };
   entries.forEach(event=>{
@@ -1374,7 +1545,7 @@ function workMonthSummary(profileId=currentProfileKey(), month=workSelectedMonth
     }else if(event.type==='haftaSonu'){
       summary.pb += hours;
       summary.total += hours;
-    }else if(event.type==='tatil'){
+    }else if(event.type==='tatil' || event.type==='ubgt'){
       summary.tatil += hours;
       summary.total += hours;
     }else if(event.type==='ucretliIzin' || event.type==='yillikIzin'){
@@ -1392,6 +1563,11 @@ function workMonthSummary(profileId=currentProfileKey(), month=workSelectedMonth
     summary.overtime += round2(Number(event.extraOvertime)||0);
     summary.night += round2(Number(event.extraNight)||0);
     summary.track += round2(Number(event.extraTrack)||0);
+    summary.ubgtFiili += round2(Number(event.extraUbgt)||0);
+    summary.kmSaat += round2(Number(event.extraKm)||0);
+    summary.rampaSefer += round2(Number(event.extraRampa)||0);
+    summary.beklemeTotal += round2((Number(event.beklemeGun)||0) * (Number(event.beklemeAdet)||0));
+    summary.beklemeAdet += Math.max(0, Math.floor(Number(event.beklemeAdet)||0));
   });
   leaveEvents.forEach(event=>{
     const sameDayEntry=entries.find(entry=>entry.date===event.date);
@@ -1442,6 +1618,11 @@ function saveWorkEvent(){
       extraOvertime:nval('workOvertimeHours'),
       extraNight:nval('workNightHours'),
       extraTrack:nval('workTrackHours'),
+      extraUbgt:nval('workUbgtHours'),
+      extraKm:nval('workKmHours'),
+      extraRampa:nval('workRampaSefer'),
+      beklemeGun:nval('workBeklemeGun'),
+      beklemeAdet:nval('workBeklemeAdet'),
       note:sval('workNote')
     });
     if(sameDayIndex>-1) events[sameDayIndex]=payload;
@@ -1478,6 +1659,11 @@ function loadWorkEventForDate(dateValue, profileId=currentProfileKey()){
   if(el('workOvertimeHours')) el('workOvertimeHours').value=event.extraOvertime || 0;
   if(el('workNightHours')) el('workNightHours').value=event.extraNight || 0;
   if(el('workTrackHours')) el('workTrackHours').value=event.extraTrack || 0;
+  if(el('workUbgtHours')) el('workUbgtHours').value=event.extraUbgt || 0;
+  if(el('workKmHours')) el('workKmHours').value=event.extraKm || 0;
+  if(el('workRampaSefer')) el('workRampaSefer').value=event.extraRampa || 0;
+  if(el('workBeklemeGun')) el('workBeklemeGun').value=event.beklemeGun || 0;
+  if(el('workBeklemeAdet')) el('workBeklemeAdet').value=event.beklemeAdet || 0;
   if(el('workNote')) el('workNote').value=event.note || '';
   renderWorkNetPreview();
   return true;
@@ -1493,9 +1679,13 @@ function renderWorkSummaryList(summary){
     ['GMŞ Ücretli', `${num(summary.gmsPaid)} saat`],
     ['Sendika TİS İzni', `${num(summary.unionLeave)} saat`],
     ['Ücretli Rapor', `${num(summary.ucretliRapor)} saat`],
+    ['UBGT Fiili', `${num(summary.ubgtFiili)} saat`],
     ['Vardiya Saati', `${num(summary.vardiya)} saat`],
     ['Gece Primi', `${num(summary.night)} saat`],
     ['Hat Bakım', `${num(summary.track)} saat`],
+    ['Km Tazminatı', `${num(summary.kmSaat)} saat`],
+    ['Rampa Tazminatı', `${num(summary.rampaSefer)} sefer`],
+    ['Bono / Bekleme', summary.beklemeTotal ? `${num(summary.beklemeTotal)} bono (${num(summary.beklemeAdet)} adet)` : 'Yok'],
     ['Fazla Mesai', `${num(summary.overtime)} saat`]
   ].map(item=>`<div class="line"><div class="l">${item[0]}</div><div class="r">${item[1]}</div></div>`).join('');
 }
@@ -1518,7 +1708,11 @@ function renderWorkEventList(summary){
     const extras=[
       event.extraOvertime ? `FM ${num(event.extraOvertime)}s` : '',
       event.extraNight ? `Gece ${num(event.extraNight)}s` : '',
-      event.extraTrack ? `Hat ${num(event.extraTrack)}s` : ''
+      event.extraTrack ? `Hat ${num(event.extraTrack)}s` : '',
+      event.extraUbgt ? `UBGT ${num(event.extraUbgt)}s` : '',
+      event.extraKm ? `Km ${num(event.extraKm)}s` : '',
+      event.extraRampa ? `Rampa ${num(event.extraRampa)}` : '',
+      event.beklemeGun && event.beklemeAdet ? `${num(event.beklemeAdet)} x ${beklemeFractionLabel(event.beklemeGun)} Bono` : ''
     ].filter(Boolean).join(' • ');
     const noteParts=[
       `${event.startTime} - ${event.endTime}`,
@@ -1585,10 +1779,10 @@ function renderWorkModule(){
   });
   const summary=workMonthSummary();
   if(el('workNormalHours')) el('workNormalHours').textContent=`${num(summary.normal)} saat`;
-  if(el('workPbHours')) el('workPbHours').textContent=`${num(round2(summary.pb + summary.tatil))} saat`;
+  if(el('workPbHours')) el('workPbHours').textContent=`${num(round2(summary.pb + summary.tatil + summary.ubgtFiili))} saat`;
   if(el('workTotalHours')) el('workTotalHours').textContent=`${num(summary.total)} saat`;
   if(el('workOvertimeTotal')) el('workOvertimeTotal').textContent=`${num(summary.overtime)} saat`;
-  if(el('workCalendarHint')) el('workCalendarHint').textContent=summary.entries.length || summary.ucretliIzin ? 'Bu ayın çalışma takviminden fazla mesai, yıllık izin, GMŞ ücretli ve Sendika TİS izni maaş ekranına otomatik taşınır.' : 'Bu ay için kayıt yoksa fazla mesai ve izin alanları otomatik doldurulmaz.';
+  if(el('workCalendarHint')) el('workCalendarHint').textContent=summary.entries.length || summary.ucretliIzin ? 'Bu ayın çalışma takviminden fazla mesai, UBGT, bono, km, rampa ve izin kayıtları maaş ekranına otomatik taşınır.' : 'Bu ay için kayıt yoksa fazla mesai ve izin alanları otomatik doldurulmaz.';
   renderWorkSummaryList(summary);
   renderWorkEventList(summary);
   renderWorkCalendar(summary);
@@ -1619,9 +1813,9 @@ function selectedWorkModel(){
 }
 function workModelEntries(model=selectedWorkModel(), summary=workMonthSummary()){
   const entries=[...summary.entries];
-  if(model.id==='puantaj') return entries.filter(item=>item.extraOvertime || item.extraNight || item.extraTrack || isVardiyaWorkType(item.type) || ['haftaSonu','tatil'].includes(item.type));
-  if(model.id==='kilometre') return entries.filter(item=>item.extraTrack || item.extraOvertime || item.note || isVardiyaWorkType(item.type));
-  if(model.id==='bekleme') return entries.filter(item=>/bekleme|bono|yatak/i.test(String(item.note||'')) || item.extraTrack || item.extraOvertime);
+  if(model.id==='puantaj') return entries.filter(item=>item.extraOvertime || item.extraNight || item.extraTrack || item.extraUbgt || isVardiyaWorkType(item.type) || ['haftaSonu','tatil','ubgt'].includes(item.type));
+  if(model.id==='kilometre') return entries.filter(item=>item.extraKm || item.extraTrack || item.extraOvertime || item.note || isVardiyaWorkType(item.type));
+  if(model.id==='bekleme') return entries.filter(item=>item.beklemeAdet || /bekleme|bono|yatak/i.test(String(item.note||'')) || item.extraTrack || item.extraOvertime);
   if(model.id==='marmaray') return entries.filter(item=>item.type || item.extraOvertime || item.extraNight);
   if(model.id==='fiili') return entries;
   return entries;
@@ -1705,12 +1899,16 @@ function workModelBaseData(model=selectedWorkModel(), summary=workMonthSummary()
     night:summary.night,
     nightExcess:workNightExcess(summary),
     holiday:summary.tatil,
+    ubgtFiili:summary.ubgtFiili,
     weekend:summary.pb,
     meal:workMealDayCount(summary),
     shift:summary.vardiya,
     total:summary.total,
     normal:summary.normal,
     track:summary.track,
+    km:summary.kmSaat,
+    rampa:summary.rampaSefer,
+    bekleme:summary.beklemeTotal,
     leave:round2(summary.ucretliIzin + summary.ucretliRapor)
   };
   const entries=workModelEntries(model, summary);
@@ -1735,6 +1933,10 @@ function workModelEntryRows(data,limit=18){
       night:modelHours(item.extraNight),
       nightExcess:modelHours(Math.max(0,(Number(item.extraNight)||0)-7.5)),
       overtime:modelHours(item.extraOvertime),
+      ubgt:modelHours(item.extraUbgt),
+      km:modelHours(item.extraKm),
+      rampa:item.extraRampa ? num(item.extraRampa) : '',
+      bekleme:item.beklemeGun && item.beklemeAdet ? `${num(item.beklemeAdet)} x ${beklemeFractionLabel(item.beklemeGun)}` : '',
       note:item.note || ''
     };
   });
@@ -1745,6 +1947,7 @@ function renderPuantajModel(data){
     ['GECE ÇALIŞMA SAATİ','night',data.totals.night],
     ['GECE ÇALIŞMA SAATİ AŞAN KISIM','nightExcess',data.totals.nightExcess],
     ['ULUSAL BAYRAM-GENEL TATİL ÇALIŞMA SAATİ','holiday',data.totals.holiday],
+    ['UBGT FİİLİ ÇALIŞMA SAATİ','ubgtFiili',data.totals.ubgtFiili],
     ['HAFTA TATİLİ (7 GÜN) ÇALIŞMA SAATİ','weekend',data.totals.weekend],
     ['İAŞE GÜN SAYISI','meal',data.totals.meal],
     ['VARDİYALI ÇALIŞMA','shift',data.totals.shift]
@@ -1782,7 +1985,7 @@ function renderKilometreModel(data){
       <div class="work-doc-field"><label>İş Yeri Kodu</label>${modelFieldInput('workplace',data.workplace)}</div>
     </div>
     <table class="work-doc-table"><thead><tr><th>Ünvanı</th><th>Görev Durumu</th><th>Ünvan Kodu</th><th>Kendi Merkezi Yolcu</th><th>Kendi Merkezi Yük</th><th>Başka Merkez Yolcu</th><th>Başka Merkez Yük</th><th>Toplam</th><th>İş Treni</th><th>Bekleme</th><th>Sefer</th></tr></thead><tbody>
-      ${rows.map((row,index)=>`<tr>${row.map(cell=>`<td>${esc(cell)}</td>`).join('')}<td>${modelTotalInput(`km${index}`, index===rows.length-1?modelHours(data.totals.track):'')}</td><td>${modelTotalInput(`istreni${index}`, '')}</td><td>${modelTotalInput(`bekleme${index}`, '')}</td><td>${modelTotalInput(`sefer${index}`, '')}</td></tr>`).join('')}
+      ${rows.map((row,index)=>`<tr>${row.map(cell=>`<td>${esc(cell)}</td>`).join('')}<td>${modelTotalInput(`km${index}`, index===rows.length-1?modelHours(data.totals.km):'')}</td><td>${modelTotalInput(`istreni${index}`, '')}</td><td>${modelTotalInput(`bekleme${index}`, index===rows.length-1?modelHours(data.totals.bekleme):'')}</td><td>${modelTotalInput(`sefer${index}`, index===rows.length-1?num(data.totals.rampa):'')}</td></tr>`).join('')}
     </tbody></table>
     <div class="work-doc-note">Bu model trafik cetveline uygun olarak tarafımdan yazılmıştır.</div>
     <div class="work-doc-foot"><div class="work-doc-sign">Sicil / Personel No: ${modelFieldInput('bottomSicil',data.sicil)}</div><div class="work-doc-sign">İmzası</div></div>
@@ -1901,6 +2104,7 @@ function workModelExportTable(data,edits={fields:{},totals:{}}){
         ['Gece Çalışma Saati',totalValue('night',modelHours(data.totals.night)),totalValue('nightText',modelHoursText(data.totals.night))],
         ['Gece Çalışması Aşan Kısım',totalValue('nightExcess',modelHours(data.totals.nightExcess)),totalValue('nightExcessText',modelHoursText(data.totals.nightExcess))],
         ['Ulusal Bayram Genel Tatil',totalValue('holiday',modelHours(data.totals.holiday)),totalValue('holidayText',modelHoursText(data.totals.holiday))],
+        ['UBGT Fiili Çalışma',totalValue('ubgtFiili',modelHours(data.totals.ubgtFiili)),totalValue('ubgtFiiliText',modelHoursText(data.totals.ubgtFiili))],
         ['Hafta Tatili Çalışma Saati',totalValue('weekend',modelHours(data.totals.weekend)),totalValue('weekendText',modelHoursText(data.totals.weekend))],
         ['İaşe Gün Sayısı',totalValue('meal',String(data.totals.meal || '')),totalValue('mealText',data.totals.meal ? integerToTurkishWords(data.totals.meal) : '')],
         ['Vardiyalı Çalışma',totalValue('shift',modelHours(data.totals.shift)),totalValue('shiftText',modelHoursText(data.totals.shift))]
@@ -2378,6 +2582,11 @@ function fillCalendarInputs(resetBase=false){
   if(el('vardiyaSaat')) el('vardiyaSaat').value=workSummary.vardiya || 0;
   if(el('geceSaat')) el('geceSaat').value=workSummary.night || 0;
   if(el('hatBakimSaat')) el('hatBakimSaat').value=workSummary.track || 0;
+  if(el('tatil')) el('tatil').value=workSummary.tatil || 0;
+  if(el('ubgtFiiliSaat')) el('ubgtFiiliSaat').value=workSummary.ubgtFiili || 0;
+  if(el('kmSaat')) el('kmSaat').value=workSummary.kmSaat || 0;
+  if(el('rampaSefer')) el('rampaSefer').value=workSummary.rampaSefer || 0;
+  applyBeklemeSummaryToSalary(workSummary.beklemeTotal);
   if(el('yillikIzin')) el('yillikIzin').value=workSummary.annualLeave || 0;
   if(el('gmsUcretli')) el('gmsUcretli').value=workSummary.gmsPaid || 0;
   if(el('sendikaTisIzin')) el('sendikaTisIzin').value=workSummary.unionLeave || 0;
@@ -2393,6 +2602,11 @@ function fillCalendarInputs(resetBase=false){
   if(el('vardiyaSaat')) el('vardiyaSaat').value=workSummary.vardiya || 0;
   if(el('geceSaat')) el('geceSaat').value=workSummary.night || 0;
   if(el('hatBakimSaat')) el('hatBakimSaat').value=workSummary.track || 0;
+  if(el('tatil')) el('tatil').value=workSummary.tatil || 0;
+  if(el('ubgtFiiliSaat')) el('ubgtFiiliSaat').value=workSummary.ubgtFiili || 0;
+  if(el('kmSaat')) el('kmSaat').value=workSummary.kmSaat || 0;
+  if(el('rampaSefer')) el('rampaSefer').value=workSummary.rampaSefer || 0;
+  applyBeklemeSummaryToSalary(workSummary.beklemeTotal);
   if(el('yillikIzin')) el('yillikIzin').value=workSummary.annualLeave || 0;
   if(el('gmsUcretli')) el('gmsUcretli').value=workSummary.gmsPaid || 0;
   if(el('sendikaTisIzin')) el('sendikaTisIzin').value=workSummary.unionLeave || 0;
@@ -2400,6 +2614,18 @@ function fillCalendarInputs(resetBase=false){
   syncPaidLeaveTotal();
   if(el('postabasi')) el('postabasi').value=el('profilePostabasi')?.checked ? '1' : '0';
   syncDengeTazminati();
+}
+function applyBeklemeSummaryToSalary(total){
+  if(!el('beklemeGun') || !el('beklemeAdet')) return;
+  const safe=round2(Number(total)||0);
+  if(!safe){
+    el('beklemeGun').value=0;
+    el('beklemeAdet').value=0;
+    return;
+  }
+  const quarterCount=Math.max(1, Math.round(safe / 0.25));
+  el('beklemeGun').value=0.25;
+  el('beklemeAdet').value=quarterCount;
 }
 function roundManevraHours(hours){
   const safe=Math.max(0, Number(hours)||0);
@@ -2425,6 +2651,20 @@ function beklemeSelection(){
 function salaryManualGvRate(){
   const rate=Number(el('manualGvRate')?.value || 20);
   return [15,20,27,35].includes(rate) ? rate : 20;
+}
+function hizmetYearsFromServiceYears(years){
+  return Math.max(0, Math.floor(Number(years)||0) - 1);
+}
+function salarySpecialDeduction(){
+  const manual=round2(Math.max(0,nval('odylHizmeti')));
+  if(manual>0){
+    return {amount:manual,label:"KDV'li Hizmet / ODYL / Diger Ozel Kesinti",automatic:false};
+  }
+  const referenceApplies=sval('company')==='TCDD_TASIMACILIK' && sval('month')==='2026-05';
+  if(referenceApplies){
+    return {amount:TASIMACILIK_MAY_2026_ODYL_DEDUCTION,label:"KDV'li Hizmet / ODYL (05/2026 referans)",automatic:true};
+  }
+  return {amount:0,label:"KDV'li Hizmet / ODYL / Diger Ozel Kesinti",automatic:false};
 }
 function progressiveTax(base, prev){
   const taxable=Math.max(0, base);
@@ -2465,7 +2705,8 @@ function gatherResult(){
   const hourlyTotal=round2(base + emekGross);
   const prevBonus=syncPreviousBonusControls(hourlyTotal);
   const hzUnit=hizmetUnit();
-  const hizmetGross=round2(hzUnit * yrs);
+  const hizmetYears=hizmetYearsFromServiceYears(yrs);
+  const hizmetGross=round2(hzUnit * hizmetYears);
   const gmsRate=nval('tayitPercent')/100;
   const sendika=round2(5 * (hourlyTotal + (hourlyTotal * gmsRate)));
   const annualLeaveHours=salaryAnnualLeaveHours();
@@ -2535,6 +2776,7 @@ function gatherResult(){
   const dvBase = round2(Math.max(0, gross - (nval('yemekGun')*nval('yemekGvIst')) - kmTaxExempt - nval('yurticiSefer') - nval('digerSgkDisi')));
   const dvGross = round2(dvBase*DEFAULT_DAMGA_RATE);
   const dvNet = round2(Math.max(0, dvGross - nval('dvIstisna')));
+  const specialDeduction=salarySpecialDeduction();
   const kesintiler=[
     ['SGK İşçi Payı', sgk],
     ['İşsizlik Primi', issizlik],
@@ -2544,11 +2786,11 @@ function gatherResult(){
   ];
   if(nval('sporAidati')>0) kesintiler.push(['Spor Aidatı', round2(nval('sporAidati'))]);
   if(nval('lojman')>0) kesintiler.push(['Lojman', round2(nval('lojman'))]);
-  if(nval('odylHizmeti')>0) kesintiler.push(['ÖDYL Hizmeti / Diğer Özel Kesinti', round2(nval('odylHizmeti'))]);
+  if(specialDeduction.amount>0) kesintiler.push([specialDeduction.label, specialDeduction.amount]);
   const totalDeductions = sum(kesintiler.map(x=>x[1]));
   const net = round2(gross - totalDeductions);
 
-  return {yrs,base,emekGross,hzUnit,hizmetGross,hourlyTotal,sendika,tayitHours,annualLeaveHours,gmsPaidHours,unionLeaveHours,paidLeaveTotal,prevBonus,prevBonusCarryBase,manualSgkCarryBase,gelirler,kesintiler,gross,sgkBase,sgkCarryBase,sgkContributionBase,gvBase,dvBase,sgk,issizlik,gvBrut,gvNet,dvGross,dvNet,totalDeductions,net,kmTaxExempt,rampaSefer,rampaTutar,bekleme,postabasiTutar,disabledTaxExemption,resolvedStep};
+  return {yrs,hizmetYears,base,emekGross,hzUnit,hizmetGross,hourlyTotal,sendika,tayitHours,annualLeaveHours,gmsPaidHours,unionLeaveHours,paidLeaveTotal,prevBonus,prevBonusCarryBase,manualSgkCarryBase,specialDeduction,gelirler,kesintiler,gross,sgkBase,sgkCarryBase,sgkContributionBase,gvBase,dvBase,sgk,issizlik,gvBrut,gvNet,dvGross,dvNet,totalDeductions,net,kmTaxExempt,rampaSefer,rampaTutar,bekleme,postabasiTutar,disabledTaxExemption,resolvedStep};
 }
 function tedbProgressiveTax(base, prev, method, manualRate){
   const taxable=Math.max(0, base);
@@ -2816,7 +3058,7 @@ function renderOfficialPayroll(r){
     payrollDeductionRow('Sendika Kesintisi', r.sendika),
     payrollDeductionRow('Spor Aidatı', nval('sporAidati')),
     payrollDeductionRow('Lojman', nval('lojman')),
-    payrollDeductionRow('ÖDYL Hizmeti / Diğer Özel Kesinti', nval('odylHizmeti'))
+    payrollDeductionRow(r.specialDeduction?.label || 'KDVli Hizmet / ÖDYL / Diğer Özel Kesinti', r.specialDeduction?.amount || 0)
   ];
   padPayrollRows(extraRows, 7, 3);
   padPayrollRows(specialRows, 7, 2);
@@ -2834,7 +3076,7 @@ function renderOfficialPayroll(r){
     </div>
     <div class="payroll-grid">
       <table class="payroll-table"><thead><tr><th>EK KAZANÇLAR</th><th>NET</th><th>BRÜT</th></tr></thead><tbody>${extraRows.join('')}<tr class="total"><td>Ek Kazançlar Toplamı</td><td></td><td class="num">${plainMoney(extraTotal)}</td></tr></tbody></table>
-      <table class="payroll-table"><thead><tr><th>ÖZEL KESİNTİLER</th><th>TUTAR</th></tr></thead><tbody>${specialRows.join('')}<tr class="total"><td>Özel Kesintiler Toplamı</td><td class="num">${plainMoney(round2(r.sendika+nval('sporAidati')+nval('lojman')+nval('odylHizmeti')))}</td></tr></tbody></table>
+      <table class="payroll-table"><thead><tr><th>ÖZEL KESİNTİLER</th><th>TUTAR</th></tr></thead><tbody>${specialRows.join('')}<tr class="total"><td>Özel Kesintiler Toplamı</td><td class="num">${plainMoney(round2(r.sendika+nval('sporAidati')+nval('lojman')+(r.specialDeduction?.amount || 0)))}</td></tr></tbody></table>
     </div>
     <div class="payroll-grid">
       <div class="payroll-stack">
@@ -2863,7 +3105,7 @@ function computeAll(){
   el('kpiServiceYears').textContent=String(r.yrs);
   el('profileEmekGross').textContent=money(r.emekGross);
   el('profileHizmetGross').textContent=money(r.hizmetGross);
-  el('profileServiceYears').textContent=String(r.yrs);
+  el('profileServiceYears').textContent=String(r.hizmetYears);
 
   const summaryCompanyLogo = COMPANY_LOGOS[sval('company')] || 'images/summary_logo_default.png';
   el('summaryLogo').src = summaryCompanyLogo;
@@ -2882,7 +3124,8 @@ function computeAll(){
   el('gelirlerList').innerHTML = r.gelirler.map(x=>`<div class="line"><div class="l">${x[0]}</div><div class="r">${money(x[1])}</div></div>`).join('') + `<div class="line"><div class="l"><strong>Toplam Brüt</strong></div><div class="r"><strong>${money(r.gross)}</strong></div></div>`;
   el('kesintilerList').innerHTML = r.kesintiler.map(x=>`<div class="line"><div class="l">${x[0]}</div><div class="r neg">${money(x[1])}</div></div>`).join('') + `<div class="line"><div class="l"><strong>Toplam Kesinti</strong></div><div class="r neg"><strong>${money(r.totalDeductions)}</strong></div></div>`;
   const bonusCarryNote=r.prevBonusCarryBase>0 ? ` Önceki ay ikramiye SGK matrah devri (${money(r.prevBonusCarryBase)}) bu ayın SGK ve işsizlik kesintisine eklendi.` : '';
-  el('calcNote').textContent = `Bu hesaplama bilgilendirme ve öğrenme amaçlıdır. Resmi bordro, resmi yazı veya kurum işlemi yerine geçmez; nihai bordro ve kurum kayıtları esas alınmalıdır.${bonusCarryNote}`;
+  const specialDeductionNote=r.specialDeduction?.automatic ? ` 05/2026 TCDD Taşımacılık referans bordrosundaki ${r.specialDeduction.label} özel kesintisi (${money(r.specialDeduction.amount)}) otomatik eklendi.` : '';
+  el('calcNote').textContent = `Bu hesaplama bilgilendirme ve öğrenme amaçlıdır. Resmi bordro, resmi yazı veya kurum işlemi yerine geçmez; nihai bordro ve kurum kayıtları esas alınmalıdır.${bonusCarryNote}${specialDeductionNote}`;
   renderOfficialPayroll(r);
   computeTedb(r);
   renderLeaveModule();
@@ -2890,7 +3133,7 @@ function computeAll(){
 function formProfile(){
   return {
     id: sval('sicil') || 'p_'+Date.now(),
-    sicil:sval('sicil'), fullName:sval('fullName'), bolge:sval('bolge'), company:sval('company'), workerType:sval('workerType'), skala:sval('skala'), calismaModeli:sval('calismaModeli'), degree:sval('degree'), kademe:sval('kademe'), girisYili:sval('girisYili'), girisAy:sval('girisAy'), militaryAfterStart:sval('militaryAfterStart'), carryAnnualLeave:sval('carryAnnualLeave'), terfiBilgisi:sval('terfiBilgisi'), postabasi:el('profilePostabasi')?.checked ? '1' : '0'
+    sicil:sval('sicil'), fullName:sval('fullName'), bolge:sval('bolge'), company:sval('company'), workerType:sval('workerType'), skala:sval('skala'), calismaModeli:sval('calismaModeli'), degree:sval('degree'), kademe:sval('kademe'), girisYili:sval('girisYili'), girisAy:sval('girisAy'), probationMonths:sval('probationMonths'), militaryAfterStart:sval('militaryAfterStart'), militaryDelayMonths:sval('militaryDelayMonths'), carryAnnualLeave:sval('carryAnnualLeave'), terfiBilgisi:sval('terfiBilgisi'), postabasi:el('profilePostabasi')?.checked ? '1' : '0'
   };
 }
 function cleanProfileText(value){
@@ -2924,7 +3167,9 @@ function profileFlatFields(profile={}){
     profileKademe:cleanProfileText(profile.kademe),
     profileGirisYili:cleanProfileText(profile.girisYili),
     profileGirisAy:cleanProfileText(profile.girisAy),
+    profileProbationMonths:cleanProfileText(profile.probationMonths),
     profileMilitaryAfterStart:cleanProfileText(profile.militaryAfterStart),
+    profileMilitaryDelayMonths:cleanProfileText(profile.militaryDelayMonths),
     profileCarryAnnualLeave:cleanProfileText(profile.carryAnnualLeave),
     profileTerfiBilgisi:cleanProfileText(profile.terfiBilgisi),
     profilePostabasi:cleanProfileText(profile.postabasi)
@@ -2961,7 +3206,9 @@ function profileFromMembershipRecord(record={}, existing={}){
     kademe:pickProfileText(record.profileKademe, record.kademe, existing.kademe, 'I'),
     girisYili:pickProfileText(record.profileGirisYili, record.girisYili, existing.girisYili),
     girisAy:pickProfileText(record.profileGirisAy, record.girisAy, existing.girisAy, '01'),
+    probationMonths:pickProfileText(record.profileProbationMonths, record.probationMonths, existing.probationMonths, '4'),
     militaryAfterStart:pickProfileText(record.profileMilitaryAfterStart, record.militaryAfterStart, existing.militaryAfterStart, 'yok'),
+    militaryDelayMonths:pickProfileText(record.profileMilitaryDelayMonths, record.militaryDelayMonths, existing.militaryDelayMonths, String(pickProfileText(record.profileMilitaryAfterStart, record.militaryAfterStart, existing.militaryAfterStart)==='var' ? 12 : 0)),
     carryAnnualLeave:pickProfileText(record.profileCarryAnnualLeave, record.carryAnnualLeave, existing.carryAnnualLeave, '0'),
     terfiBilgisi:roleText,
     postabasi:pickProfileText(record.profilePostabasi, record.postabasi, existing.postabasi, '0')
@@ -3027,7 +3274,10 @@ function applyProfile(p){
   el('kademe').value=p.kademe||'I';
   el('girisYili').value=p.girisYili||'';
   el('girisAy').value=p.girisAy||'01';
-  el('militaryAfterStart').value=p.militaryAfterStart||'yok';
+  if(el('probationMonths')) el('probationMonths').value=p.probationMonths||'4';
+  const militaryStatus=String(p.militaryAfterStart||'yok')==='var' ? 'after' : (p.militaryAfterStart||'yok');
+  if(el('militaryAfterStart')) el('militaryAfterStart').value=militaryStatus;
+  if(el('militaryDelayMonths')) el('militaryDelayMonths').value=p.militaryDelayMonths || (String(p.militaryAfterStart||'')==='var' ? '12' : '0');
   el('carryAnnualLeave').value=p.carryAnnualLeave||0;
   setSelectValueOrCustom('terfiBilgisi', p.terfiBilgisi || '');
   if(el('profilePostabasi')) el('profilePostabasi').checked=String(p.postabasi||'0')==='1';
@@ -3076,7 +3326,8 @@ function renderProfiles(){
   if(!list.length){ wrap.innerHTML='<div class="info-box">Kayıtlı personel yok.</div>'; return; }
   wrap.innerHTML=list.map((p,index)=>{
     const start=startProfilePeriod(p);
-    return `<div class="saved-card tone-${index % 2 === 0 ? 'a' : 'b'} ${currentProfileId===p.id?'active':''}"><div class="top"><div><div class="name-row"><div class="name">${p.sicil||'-'} • ${p.fullName||'İsimsiz Personel'}</div>${currentProfileId===p.id?'<span class="saved-state-pill">Aktif</span>':''}</div><div class="meta">${companyLabel(p.company)} • ${p.bolge||'-'}<br>${workScheduleLabel(p)} • Skala ${p.skala||'-'} • Derece ${p.degree||'-'} / ${p.kademe||'-'} • Giriş ${p.girisYili||'-'}/${p.girisAy||'01'}${start ? ` • Terfi ${formatPeriodLabel(start)}` : ''}${String(p.postabasi||'0')==='1' ? ' • Postabaşı' : ''}</div></div></div><div class="saved-actions"><button class="btn small soft" type="button" onclick="editProfile('${p.id}')">Düzenle</button><button class="btn small primary" type="button" onclick="startSalaryWithProfile('${p.id}')">Maaş Hesapla</button><button class="btn small" type="button" onclick="selectTedbProfile('${p.id}')">İkramiye Hesapla</button><button class="btn small danger" type="button" onclick="deleteProfile('${p.id}')">Sil</button></div></div>`;
+    const delay=profileMilitaryDelayMonths(p);
+    return `<div class="saved-card tone-${index % 2 === 0 ? 'a' : 'b'} ${currentProfileId===p.id?'active':''}"><div class="top"><div><div class="name-row"><div class="name">${p.sicil||'-'} • ${p.fullName||'İsimsiz Personel'}</div>${currentProfileId===p.id?'<span class="saved-state-pill">Aktif</span>':''}</div><div class="meta">${companyLabel(p.company)} • ${p.bolge||'-'}<br>${workScheduleLabel(p)} • Skala ${p.skala||'-'} • Derece ${p.degree||'-'} / ${p.kademe||'-'} • Giriş ${p.girisYili||'-'}/${p.girisAy||'01'}${start ? ` • Terfi ${formatPeriodLabel(start)}` : ''}${delay ? ` • Askerlik öteleme ${delay} ay` : ''}${String(p.postabasi||'0')==='1' ? ' • Postabaşı' : ''}</div></div></div><div class="saved-actions"><button class="btn small soft" type="button" onclick="editProfile('${p.id}')">Düzenle</button><button class="btn small primary" type="button" onclick="startSalaryWithProfile('${p.id}')">Maaş Hesapla</button><button class="btn small" type="button" onclick="selectTedbProfile('${p.id}')">İkramiye Hesapla</button><button class="btn small danger" type="button" onclick="deleteProfile('${p.id}')">Sil</button></div></div>`;
   }).join('');
 }
 window.startSalaryWithProfile=startSalaryWithProfile;
@@ -3130,7 +3381,9 @@ function clearProfileForm(message=''){
   currentProfileId='';
   ['sicil','fullName','bolge','girisYili','terfiBilgisi'].forEach(id=>{ if(el(id)) el(id).value=''; });
   if(el('girisAy')) el('girisAy').value='01';
+  if(el('probationMonths')) el('probationMonths').value='4';
   if(el('militaryAfterStart')) el('militaryAfterStart').value='yok';
+  if(el('militaryDelayMonths')) el('militaryDelayMonths').value='0';
   if(el('carryAnnualLeave')) el('carryAnnualLeave').value=0;
   if(el('profilePostabasi')) el('profilePostabasi').checked=false;
   if(el('postabasi')) el('postabasi').value='0';
@@ -3476,12 +3729,14 @@ function generatedForumNick(){
   if(saved) return saved;
   const created=`Demiryolcu${Math.floor(100 + Math.random()*900)}`;
   localStorage.setItem(FORUM_NICK_KEY, created);
+  scheduleUserDataSync('forum-nick');
   return created;
 }
 function currentForumNick(){
   const fromInput=cleanForumNick(el('forumNick')?.value || '');
   const nick=fromInput || generatedForumNick();
   localStorage.setItem(FORUM_NICK_KEY, nick);
+  scheduleUserDataSync('forum-nick');
   if(el('forumNick') && el('forumNick').value!==nick) el('forumNick').value=nick;
   return nick;
 }
@@ -3577,6 +3832,7 @@ function saveForumDraft(){
     reply:el('forumReplyBody')?.value || ''
   };
   localStorage.setItem(FORUM_DRAFT_KEY, JSON.stringify(draft));
+  scheduleUserDataSync('forum-draft');
 }
 function restoreForumDraft(){
   const raw=localStorage.getItem(FORUM_DRAFT_KEY);
@@ -3596,6 +3852,7 @@ function clearForumTopicDraft(){
   const reply=el('forumReplyBody')?.value || '';
   const nick=currentForumNick();
   localStorage.setItem(FORUM_DRAFT_KEY, JSON.stringify({category:'gundem',nick,title:'',body:'',reply}));
+  scheduleUserDataSync('forum-draft');
   if(el('forumTitle')) el('forumTitle').value='';
   if(el('forumBody')) el('forumBody').value='';
 }
@@ -4499,6 +4756,19 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
     }
     return;
   }
+  if(action==='loadUserSyncData'){
+    userSyncLoading=false;
+    if(success && payload && typeof payload==='object'){
+      applyUserSyncData(payload,userSyncForceApply);
+      if(el('memberLoginStatus')) el('memberLoginStatus').textContent='Oturum açık. Telefon, web ve Android verileri Firebase üzerinden eşitlendi.';
+    }
+    userSyncForceApply=false;
+    return;
+  }
+  if(action==='updateUserSyncData'){
+    if(success && payload?.updatedAt) localStorage.setItem(USER_SYNC_UPDATED_KEY, String(payload.updatedAt));
+    return;
+  }
   if(action==='submitExchangeRequest'){
     if(success) loadFirebaseExchangeMatches(exchangeFormData());
     renderExchangeRequest();
@@ -4677,10 +4947,11 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
     if(success){
       const record=firebaseRecordFromPayload(payload);
       saveMembershipRecord(record);
-      openAdminSessionLocally();
-      registerNotificationToken();
-      firebasePendingLoaded=false;
-      loadFirebasePendingMembers(true);
+        openAdminSessionLocally();
+        registerNotificationToken();
+        window.setTimeout(()=>loadUserDataSync(true),250);
+        firebasePendingLoaded=false;
+        loadFirebasePendingMembers(true);
       loadFirebaseMembers(true);
       setPage('home');
     }else{
@@ -4732,6 +5003,7 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
       });
       registerNotificationToken();
       syncMembershipRecordToProfile(record,{activate:true,feedback:true});
+      window.setTimeout(()=>loadUserDataSync(true),250);
       renderMembershipPreview();
       setPage('home');
     }else{
@@ -4999,8 +5271,10 @@ function renderMembershipUserNotice(record,status){
     : 'İçeriklere giriş için üyelik başvurusu ve yönetim onayı gerekir.';
 }
 function updateMembershipAccessUi(record=getMembershipRecord(),status=membershipFormStatus(record)){
+  const session=getMemberSession();
   const admin=isAdminSession();
   if(admin) setMembershipAuthMode('admin');
+  el('topbarLogoutBtn')?.classList.toggle('hidden', !(session?.active && !isGuestSession(session)));
   el('homeManagementPanel')?.classList.toggle('hidden', !admin);
   el('membershipStatusPanel')?.classList.toggle('hidden', !admin);
   el('membershipAdminArea')?.classList.toggle('hidden', !admin);
@@ -5311,6 +5585,9 @@ function submitMembershipForm(){
     upsertMembershipRequest(queued);
   }
   renderMembershipPreview(now);
+  setMembershipAuthMode('login');
+  if(el('memberLoginStatus')) el('memberLoginStatus').textContent='Başvurun onaya gönderildi. Onay sonrası sicil/e-posta ve parolanla buradan giriş yapabilirsin.';
+  el('memberLoginSicil')?.focus();
 }
 function openAdminSessionLocally(){
   saveMemberSession({
@@ -5421,6 +5698,8 @@ function attemptMembershipLogin(silent=false){
   setPage('home');
 }
 function logoutMembershipSession(){
+  clearTimeout(userSyncTimer);
+  userSyncLoading=false;
   const bridge=firebaseBridge();
   if(bridge && typeof bridge.signOut==='function'){
     try{ bridge.signOut(); }catch(error){}
@@ -6347,7 +6626,7 @@ function handleEdgeSwipeMove(event){
     edgeSwipeTracking=false;
     return;
   }
-  if(!document.body.classList.contains('nav-open') && dx>72){
+  if(!IS_ANDROID_WEBVIEW && !document.body.classList.contains('nav-open') && dx>72){
     openNavDrawer();
     edgeSwipeTracking=false;
     return;
@@ -6408,7 +6687,10 @@ function handleAndroidBack(){
 window.handleAndroidBack=handleAndroidBack;
 
 // events
-Array.from(document.querySelectorAll('.nav-btn')).forEach(btn=>btn.addEventListener('click',()=>setPage(btn.dataset.page)));
+Array.from(document.querySelectorAll('.nav-btn')).forEach(btn=>btn.addEventListener('click',()=>{
+  setPage(btn.dataset.page);
+  closeNavDrawer();
+}));
 Array.from(document.querySelectorAll('.goto')).forEach(btn=>btn.addEventListener('click',()=>setPage(btn.dataset.page)));
 Array.from(document.querySelectorAll('[data-info-toggle]')).forEach(btn=>btn.addEventListener('click',event=>{
   event.stopPropagation();
@@ -6464,10 +6746,20 @@ if(el('postabasi')) el('postabasi').addEventListener('change',()=>{
   if(el('profilePostabasi')) el('profilePostabasi').checked=sval('postabasi')==='1';
 });
 ['company'].forEach(id=>el(id).addEventListener('input',()=>scheduleProfilePreviewRefresh(false)));
-['girisYili','girisAy','carryAnnualLeave'].forEach(id=>el(id).addEventListener('input',()=>scheduleProfilePreviewRefresh(true)));
+['girisYili','girisAy','probationMonths','militaryDelayMonths','carryAnnualLeave'].forEach(id=>{
+  const node=el(id);
+  if(node) node.addEventListener('input',()=>scheduleProfilePreviewRefresh(true));
+});
 ['workerType','skala'].forEach(id=>el(id).addEventListener('change',()=>{ populateDegrees(); scheduleProfilePreviewRefresh(false); }));
 ['degree','kademe','company'].forEach(id=>el(id).addEventListener('change',()=>scheduleProfilePreviewRefresh(false)));
-['girisAy','militaryAfterStart','carryAnnualLeave'].forEach(id=>el(id).addEventListener('change',()=>scheduleProfilePreviewRefresh(true)));
+['girisAy','probationMonths','militaryDelayMonths','carryAnnualLeave'].forEach(id=>{
+  const node=el(id);
+  if(node) node.addEventListener('change',()=>scheduleProfilePreviewRefresh(true));
+});
+if(el('militaryAfterStart')) el('militaryAfterStart').addEventListener('change',()=>{
+  syncMilitaryDelayControls();
+  scheduleProfilePreviewRefresh(true);
+});
 if(el('profilePostabasi')) el('profilePostabasi').addEventListener('change',()=>{
   if(el('postabasi')) el('postabasi').value=el('profilePostabasi').checked ? '1' : '0';
   scheduleProfilePreviewRefresh(false);
@@ -6503,7 +6795,7 @@ if(el('workMonth')) el('workMonth').addEventListener('change',()=>{
   renderWorkModels();
 });
 if(el('workType')) el('workType').addEventListener('change',()=>applyWorkTypeTemplate(sval('workType')));
-['workStartTime','workEndTime','workMealStart','workMealEnd','workOvertimeHours','workNightHours','workTrackHours','workDate','workEndDate','workNote'].forEach(id=>{
+['workStartTime','workEndTime','workMealStart','workMealEnd','workOvertimeHours','workNightHours','workTrackHours','workUbgtHours','workKmHours','workRampaSefer','workBeklemeGun','workBeklemeAdet','workDate','workEndDate','workNote'].forEach(id=>{
   const node=el(id);
   if(node) node.addEventListener('input',renderWorkNetPreview);
   if(node) node.addEventListener('change',renderWorkNetPreview);
@@ -6586,10 +6878,12 @@ document.addEventListener('click',event=>{
 });
 if(el('memberLoginBtn')) el('memberLoginBtn').addEventListener('click',attemptMembershipLogin);
 if(el('memberLogoutBtn')) el('memberLogoutBtn').addEventListener('click',logoutMembershipSession);
+if(el('topbarLogoutBtn')) el('topbarLogoutBtn').addEventListener('click',logoutMembershipSession);
 if(el('deleteMyDataBtn')) el('deleteMyDataBtn').addEventListener('click',requestDeleteMyData);
 if(el('guestLoginBtn')) el('guestLoginBtn').addEventListener('click',guestMembershipLogin);
 if(el('showLoginBtn')) el('showLoginBtn').addEventListener('click',focusMembershipLogin);
 if(el('showSignupBtn')) el('showSignupBtn').addEventListener('click',focusMembershipSignup);
+if(el('webMenuToggle')) el('webMenuToggle').addEventListener('click',openNavDrawer);
 ['memberLoginSicil','memberLoginEmail','memberLoginPhoneLast4','memberLoginPassword'].forEach(id=>{ const node=el(id); if(node) node.addEventListener('input',scheduleAutoMembershipLogin); });
 function keepMembershipInputVisible(node){
   const target=node?.closest?.('.auth-login-card') || node;
@@ -6720,7 +7014,9 @@ if(el('workEndDate') && !sval('workEndDate').startsWith(sval('workMonth'))) el('
 syncLeaveRangeFromInputs();
 syncWorkRangeFromInputs();
 if(!restoredLastProfile) renderActiveProfileSummary();
-setPage(canAccessPage('home') ? 'home' : 'membership');
+const bootSession=getMemberSession();
+setPage(bootSession?.active || isGuestSession(bootSession) ? (canAccessPage('home') ? 'home' : 'membership') : 'membership');
+if(!bootSession?.active) setMembershipAuthMode('choice');
 setMode('maas');
 setStep(1);
 initSocial();
@@ -6732,6 +7028,7 @@ loadFirebaseAnnouncements();
 loadMembershipForm();
 refreshCurrentMemberFromFirebase();
 registerNotificationToken();
+window.setTimeout(()=>loadUserDataSync(true),700);
 populateExchangeSelects();
 loadExchangeRequest();
 syncWorkModeFields();

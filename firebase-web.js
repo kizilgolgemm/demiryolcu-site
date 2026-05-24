@@ -545,7 +545,7 @@
     loadMembers(){
       const action='loadMembers';
       if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      db.ref('members').limitToFirst(250).once('value')
+      db.ref('members').once('value')
         .then(snapshot=>{
           const list=[];
           snapshot.forEach(child=>{
@@ -1014,6 +1014,41 @@
           notify(action,false,{},firebaseMessage(error));
         }
       })();
+    },
+
+    updateUserSyncData(payloadJson){
+      const action='updateUserSyncData';
+      if(!init()) return notify(action,false,{},'Firebase web baglantisi hazir degil.');
+      const user=auth.currentUser;
+      if(!user) return notify(action,false,{},'Veri senkronu icin once uye girisi yapilmali.');
+      (async()=>{
+        try{
+          const payload=JSON.parse(payloadJson || '{}');
+          const data={
+            ...payload,
+            uid:user.uid,
+            updatedAt:Number(payload.updatedAt || now()),
+            source:'web'
+          };
+          await db.ref(`userSync/${user.uid}`).set(data);
+          notify(action,true,{uid:user.uid,updatedAt:data.updatedAt},'Kullanici verileri senkronize edildi.');
+        }catch(error){
+          notify(action,false,{},firebaseMessage(error));
+        }
+      })();
+    },
+
+    loadUserSyncData(){
+      const action='loadUserSyncData';
+      if(!init()) return notify(action,false,{},'Firebase web baglantisi hazir degil.');
+      const user=auth.currentUser;
+      if(!user) return notify(action,false,{},'Veri senkronu icin once uye girisi yapilmali.');
+      db.ref(`userSync/${user.uid}`).once('value')
+        .then(snapshot=>{
+          const data=snapshot.val() || {};
+          notify(action,true,{...data,uid:user.uid},'Kullanici verileri yuklendi.');
+        })
+        .catch(error=>notify(action,false,{},firebaseMessage(error)));
     },
 
     signOut(){

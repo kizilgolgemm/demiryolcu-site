@@ -2,7 +2,7 @@
 <html lang="tr">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="format-detection" content="telephone=no" />
 <title>TCDD İşçi Platformu</title>
 <link rel="stylesheet" href="styles.css" />
@@ -24,11 +24,15 @@
 <header>
   <div class="wrap topbar">
     <div class="topbar-left">
+      <button class="menu-toggle web-menu-toggle" id="webMenuToggle" type="button" aria-label="Menüyü aç">
+        <span></span><span></span><span></span>
+      </button>
       <button class="brand brand-home" id="goHomeBrand" type="button" aria-label="Ana sayfaya dön">
         <img src="images/platform_logo.png" alt="TCDD İşçi Platformu" />
         <h1><span>TCDD İŞÇİ PLATFORMU</span><small>Emek kazanır. Bilgi güç verir.</small></h1>
       </button>
     </div>
+    <button class="topbar-session-logout hidden" id="topbarLogoutBtn" type="button">Oturumu Kapat</button>
     <div class="topbar-slogan" id="topbarSlogan">Emek kazanır. Bilgi güç verir.</div>
   </div>
 </header>
@@ -72,7 +76,6 @@
             <button class="info-trigger" type="button" data-info-toggle="homeInfo" aria-label="Ana sayfa bilgisi">!</button>
           </div>
           <h2>TCDD İşçi Platformu</h2>
-          <p class="home-lead">Maaş, mevzuat, izin, çalışma takvimi ve becayiş işlemleri için hazırlanmış bağımsız yardımcı platform.</p>
           <div class="info-panel hidden" id="homeInfo">Maaş, mevzuat, izin, çalışma takvimi ve becayiş işlemleri için hazırlanmış bağımsız yardımcı platform.</div>
         </div>
           <div class="home-showcase">
@@ -395,7 +398,9 @@
                 <div class="field"><label>Kademe</label><select id="kademe"><option value="KOK">Kök</option><option value="I" selected>1. Kademe</option><option value="II">2. Kademe</option></select></div>
                 <div class="field"><label>Giriş Yılı</label><input id="girisYili" type="number" step="1" placeholder="Örn: 2013"></div>
                 <div class="field"><label>Giriş Ayı</label><select id="girisAy"><option value="01">Ocak</option><option value="02">Şubat</option><option value="03">Mart</option><option value="04">Nisan</option><option value="05">Mayıs</option><option value="06">Haziran</option><option value="07">Temmuz</option><option value="08">Ağustos</option><option value="09">Eylül</option><option value="10">Ekim</option><option value="11">Kasım</option><option value="12">Aralık</option></select></div>
-                <div class="field"><label>İşe Girdikten Sonra Askerlik Hizmeti</label><select id="militaryAfterStart"><option value="yok" selected>Yok</option><option value="var">Var (12 ay etkili)</option></select></div>
+                <div class="field"><label>Deneme / Terfi Esas Süresi</label><select id="probationMonths"><option value="4" selected>4 Ay</option><option value="3">3 Ay</option><option value="0">Yok</option></select></div>
+                <div class="field"><label>Askerlik Durumu</label><select id="militaryAfterStart"><option value="yok" selected>Yok</option><option value="before">İşe Giriş Öncesi</option><option value="after">İşe Giriş Sonrası</option></select></div>
+                <div class="field"><label>Askerlik Ötelemesi</label><select id="militaryDelayMonths"><option value="0" selected>Yok</option><option value="1">1 Ay</option><option value="6">6 Ay</option><option value="12">12 Ay</option></select></div>
                 <div class="field"><label>Önceki Yıldan Devreden İzin</label><input id="carryAnnualLeave" type="number" step="0.5" value="0" placeholder="Örn: 10"></div>
                 <div class="field profile-select-field"><label data-icon="GV">Görev / Ünvan</label><select id="terfiBilgisi"><option value="">Görev / ünvan seç</option></select></div>
                 <div class="field check-field">
@@ -539,7 +544,7 @@
           <div class="grid2 striped-grid">
             <div class="field"><label>Spor Aidatı</label><input id="sporAidati" type="number" step="0.01" value="10"></div>
             <div class="field"><label>Lojman</label><input id="lojman" type="number" step="0.01" value="0"></div>
-            <div class="field"><label>ÖDYL Hizmeti / Diğer Özel Kesinti</label><input id="odylHizmeti" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>KDV'li Hizmet / ÖDYL / Diğer Özel Kesinti</label><input id="odylHizmeti" type="number" step="0.01" value="0"></div>
             <div class="field"><label>Önceki / Yıllık GV Matrahı</label><input id="prevGvMatrah" type="number" step="0.01" value="0"></div>
             <div class="field"><label>Önceki Ay İkramiye Aldınız mı?</label><select id="prevBonusReceived"><option value="hayir" selected>Hayır</option><option value="evet">Evet</option></select></div>
             <div class="field"><label>Önceki Ay İkramiye Tipi</label><select id="prevBonusType"><option value="tisHalf" selected>Yarım İkramiye (97,5 saat)</option><option value="tisFull">Tam İkramiye (225 saat)</option><option value="manual">Manuel Tutar</option></select></div>
@@ -781,7 +786,7 @@
            <div class="single-grid striped-single-grid">
              <div class="field"><label>Başlangıç Tarihi</label><input id="workDate" type="date"></div>
              <div class="field"><label>Bitiş Tarihi</label><input id="workEndDate" type="date"></div>
-             <div class="field"><label>Çalışma Tipi</label><select id="workType"><option value="normal">Normal Çalışma</option><option value="vardiyaSabah">Vardiyalı Çalışma - Sabah</option><option value="vardiyaAksam">Vardiyalı Çalışma - Akşam</option><option value="vardiyaGece">Vardiyalı Çalışma - Gece</option><option value="vardiya">Vardiya - Manuel</option><option value="haftaSonu">Hafta Sonu / P.B.</option><option value="tatil">Tatil</option><option value="yillikIzin">Yıllık İzin</option><option value="gmsUcretli">GMŞ Ücretli</option><option value="sendikaTisIzin">Sendika TİS İzni</option><option value="ucretliRapor">Ücretli Rapor</option></select></div>
+             <div class="field"><label>Çalışma Tipi</label><select id="workType"><option value="normal">Normal Çalışma</option><option value="vardiyaSabah">Vardiyalı Çalışma - Sabah</option><option value="vardiyaAksam">Vardiyalı Çalışma - Akşam</option><option value="vardiyaGece">Vardiyalı Çalışma - Gece</option><option value="vardiya">Vardiya - Manuel</option><option value="haftaSonu">Hafta Sonu / P.B.</option><option value="tatil">Tatil</option><option value="ubgt">UBGT / Ulusal Bayram Genel Tatil</option><option value="yillikIzin">Yıllık İzin</option><option value="gmsUcretli">GMŞ Ücretli</option><option value="sendikaTisIzin">Sendika TİS İzni</option><option value="ucretliRapor">Ücretli Rapor</option></select></div>
              <div class="field"><label>Başlangıç</label><input id="workStartTime" type="time" value="08:00"></div>
              <div class="field"><label>Bitiş</label><input id="workEndTime" type="time" value="17:00"></div>
             <div class="field work-advanced-field"><label>Yemek Başlangıç</label><input id="workMealStart" type="time" value="12:00"></div>
@@ -789,6 +794,11 @@
             <div class="field"><label>Fazla Mesai (saat)</label><input id="workOvertimeHours" type="number" step="0.25" value="0"></div>
              <div class="field"><label>Gece Primi (saat)</label><input id="workNightHours" type="number" step="0.25" value="0"></div>
              <div class="field work-advanced-field"><label>Hat Bakım (saat)</label><input id="workTrackHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>UBGT Fiili (saat)</label><input id="workUbgtHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>Bono / Bekleme</label><select id="workBeklemeGun"><option value="0">Yok</option><option value="1">Tam Bono</option><option value="0.75">3/4 Bono</option><option value="0.5">1/2 Bono</option><option value="0.25">1/4 Bono</option></select></div>
+             <div class="field"><label>Bono Adedi</label><input id="workBeklemeAdet" type="number" step="1" min="0" value="0"></div>
+             <div class="field"><label>Km Tazminatı (saat)</label><input id="workKmHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>Rampa Tazminatı (sefer)</label><input id="workRampaSefer" type="number" step="1" min="0" value="0"></div>
              <div class="field work-advanced-field"><label>Not</label><input id="workNote" type="text" placeholder="Örn: 15:00-23:00 vardiyası"></div>
            </div>
            <div class="work-range-hint" id="workRangeHint">Tek gün seçili.</div>
@@ -1214,7 +1224,7 @@
           </div>
           <div class="form-actions">
             <button class="btn primary" id="memberLoginBtn" type="button">Üye Girişi</button>
-            <button class="btn" id="memberLogoutBtn" type="button">Çıkış</button>
+            <button class="btn" id="memberLogoutBtn" type="button">Oturumu Kapat</button>
           </div>
           <div class="work-sync-note" id="memberLoginStatus">Üye girişi için onaylı başvuru ve parola gerekir.</div>
           <div class="account-delete-card hidden" id="accountDeleteCard">
