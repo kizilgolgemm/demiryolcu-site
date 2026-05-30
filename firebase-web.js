@@ -70,6 +70,38 @@
     return clean(value).toLowerCase();
   }
 
+  function isRealEmail(value){
+    const email=normalizeEmail(value);
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !email.endsWith('.local');
+  }
+
+  function approvalEmailPayload(record,uid){
+    const to=normalizeEmail(record.email || record.ownerEmail || record.contactEmail || record.authEmail);
+    if(!isRealEmail(to)) return null;
+    const fullName=clean(record.fullName || record.name || record.ownerName) || 'Değerli üyemiz';
+    const sicil=clean(record.sicil || record.personnelNo);
+    const sentAt=now();
+    const htmlName=fullName
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;');
+    return {
+      uid:clean(uid),
+      to,
+      type:'membership_approved',
+      template:'membershipApproved',
+      status:'pending',
+      subject:'Üyeliğiniz Onaylanmıştır',
+      createdAt:sentAt,
+      data:{fullName,sicil},
+      message:{
+        subject:'Üyeliğiniz Onaylanmıştır',
+        text:`Merhaba ${fullName},\n\nTCDD İşçi Platformu üyelik başvurunuz onaylanmıştır. Artık üye girişi yaparak platform alanlarını kullanabilirsiniz.\n\nTCDD İşçi Platformu`,
+        html:`<p>Merhaba <strong>${htmlName}</strong>,</p><p>TCDD İşçi Platformu üyelik başvurunuz onaylanmıştır. Artık üye girişi yaparak platform alanlarını kullanabilirsiniz.</p><p><strong>TCDD İşçi Platformu</strong></p>`
+      }
+    };
+  }
+
   function authEmailFor(sicil,email){
     const safeEmail=normalizeEmail(email);
     if(safeEmail && safeEmail.includes('@')) return safeEmail;
@@ -600,6 +632,7 @@
           const removeFromMembers=isBlocked(normalized);
           const appSnap=await db.ref(`membershipApplications/${safeUid}`).once('value');
           const applicationData=recordFromSnapshot(appSnap) || {uid:safeUid,firebaseUid:safeUid};
+          const wasApproved=clean(applicationData.applicationStatus).toLowerCase()==='approved';
           const updated={
             ...applicationData,
             uid:safeUid,
@@ -634,6 +667,18 @@
           }else if(makeAdmin || removeAdmin || storedStatus==='approved'){
             updates[`members/${safeUid}`]=updated;
             updates[`admins/${safeUid}`]=makeAdmin ? true : null;
+          }
+          if(storedStatus==='approved' && !removeFromMembers && !wasApproved){
+            const approvalMail=approvalEmailPayload(updated,safeUid);
+            if(approvalMail){
+              const mailRef=db.ref('approvalEmails').push();
+              const mailKey=mailRef.key;
+              updates[`approvalEmails/${mailKey}`]=approvalMail;
+              updates[`membershipApplications/${safeUid}/approvalEmailQueuedAt`]=approvalMail.createdAt;
+              updates[`membershipApplications/${safeUid}/approvalEmailQueueId`]=mailKey;
+              updates[`members/${safeUid}/approvalEmailQueuedAt`]=approvalMail.createdAt;
+              updates[`members/${safeUid}/approvalEmailQueueId`]=mailKey;
+            }
           }
           await db.ref().update(updates);
           notify(action,true,{uid:safeUid,firebaseUid:safeUid,applicationStatus:storedStatus,removedFromMembers:removeFromMembers,memberRole:updated.memberRole,isAdmin:!!updated.isAdmin,type:updated.type || 'standart'},removeFromMembers ? 'Üye aktif listeden çıkarıldı ve erişimi kapatıldı.' : makeAdmin ? 'Üye yönetici yapıldı.' : removeAdmin ? 'Yönetici yetkisi kaldırıldı, üye standart üye olarak devam ediyor.' : 'Üyelik durumu güncellendi.');

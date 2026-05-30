@@ -3679,6 +3679,32 @@ function loadFirebaseExchangeMatches(record){
 function forumCategoryLabel(value){
   return FORUM_CATEGORIES[value] || 'Gündem';
 }
+function forumCategoryIcon(value){
+  const icons={
+    all:'TÜ',
+    gundem:'GN',
+    calisma:'ÇL',
+    maas:'₺',
+    sendika:'SN',
+    mevzuat:'MV',
+    becayis:'BC',
+    yardim:'?'
+  };
+  return icons[value] || 'GN';
+}
+function forumCategoryTone(value){
+  const tones={
+    all:'sky',
+    gundem:'blue',
+    calisma:'teal',
+    maas:'green',
+    sendika:'amber',
+    mevzuat:'indigo',
+    becayis:'orange',
+    yardim:'rose'
+  };
+  return tones[value] || 'blue';
+}
 function forumDateLabel(value){
   const time=Number(value) || Date.parse(value || '');
   if(!time) return '-';
@@ -4022,10 +4048,14 @@ function renderForumTopicList(){
   }
   node.innerHTML=topics.map(item=>{
     const active=item.topicId===selectedForumTopicId ? ' active' : '';
-    return `<button type="button" class="forum-topic-row${active}" data-forum-topic="${esc(item.topicId)}">
-      <span class="forum-topic-avatar">${esc(forumAuthorInitial(item.authorName))}</span>
+    const tone=forumCategoryTone(item.category);
+    return `<button type="button" class="forum-topic-row${active}" data-forum-topic="${esc(item.topicId)}" data-tone="${esc(tone)}">
+      <span class="forum-topic-avatar" data-tone="${esc(tone)}">
+        <span class="forum-topic-avatar-initial">${esc(forumAuthorInitial(item.authorName))}</span>
+        <span class="forum-topic-badge">${esc(forumCategoryIcon(item.category))}</span>
+      </span>
       <span class="forum-topic-content">
-        <span class="forum-topic-meta"><span>${esc(forumCategoryLabel(item.category))}</span><span>${esc(forumDateLabel(item.lastActivityAt || item.createdAt))}</span></span>
+        <span class="forum-topic-meta"><span class="forum-chip" data-tone="${esc(tone)}"><b>${esc(forumCategoryIcon(item.category))}</b>${esc(forumCategoryLabel(item.category))}</span><span>${esc(forumDateLabel(item.lastActivityAt || item.createdAt))}</span></span>
         <strong>${esc(item.title)}</strong>
         <span class="forum-topic-excerpt">${esc(forumExcerpt(item.body))}</span>
         <span class="forum-topic-author">${esc(item.authorName)}</span>
@@ -4063,10 +4093,14 @@ function renderForumTopicDetail(){
           </div>`;
         }).join('')}</div>`
       : '<div class="forum-empty">Henüz cevap yok.</div>';
+  const tone=forumCategoryTone(topic.category);
   node.innerHTML=`<div class="forum-detail-title">
-    <div class="forum-detail-meta"><span>${esc(forumCategoryLabel(topic.category))}</span><span>${esc(forumDateLabel(topic.createdAt))}</span><span>${esc(forumReplyLabel(topic.replyCount))}</span></div>
+    <div class="forum-detail-meta"><span class="forum-chip" data-tone="${esc(tone)}"><b>${esc(forumCategoryIcon(topic.category))}</b>${esc(forumCategoryLabel(topic.category))}</span><span>${esc(forumDateLabel(topic.createdAt))}</span><span>${esc(forumReplyLabel(topic.replyCount))}</span></div>
     <div class="forum-detail-main">
-      <span class="forum-topic-avatar large">${esc(forumAuthorInitial(topic.authorName))}</span>
+      <span class="forum-topic-avatar large" data-tone="${esc(tone)}">
+        <span class="forum-topic-avatar-initial">${esc(forumAuthorInitial(topic.authorName))}</span>
+        <span class="forum-topic-badge">${esc(forumCategoryIcon(topic.category))}</span>
+      </span>
       <h3>${esc(topic.title)}</h3>
     </div>
     <div class="forum-detail-meta"><span>${esc(topic.authorName)}</span><span>${esc(topic.authorRole || 'Üye')}</span></div>
