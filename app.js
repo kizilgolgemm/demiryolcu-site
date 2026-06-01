@@ -49,6 +49,7 @@ const SALARY_FORM_STORAGE_KEY='tcdd_salary_form_v1';
 const EXCHANGE_REQUEST_KEY='tcdd_exchange_request_v1';
 const FORUM_DRAFT_KEY='tcdd_forum_draft_v1';
 const FORUM_NICK_KEY='tcdd_forum_nick_v1';
+const FORUM_BLOCKED_AUTHORS_KEY='tcdd_forum_blocked_authors_v1';
 const USER_SYNC_UPDATED_KEY='tcdd_user_sync_updated_v1';
 const HOME_ANNOUNCEMENT_KEY='tcdd_home_announcement_2026_04_29';
 const ANNOUNCEMENT_WELCOME_DISMISSED_KEY='tcdd_announcement_welcome_dismissed_v1';
@@ -906,10 +907,17 @@ function setPage(page, options={}){
       : 'Bu alana giriş için onaylı üyelik gerekir. Lütfen üye girişi yap veya başvuru gönder.');
     page='membership';
   }
+  const previousPage=currentPage;
+  const samePage=previousPage===page;
+  const forceScrollTop=options.forceScrollTop===true || options.scrollTop===true;
+  const shouldScrollTop=options.scrollTop!==false && (!samePage || forceScrollTop);
+  const shouldClosePanels=options.closePanels!==false && (!samePage || forceScrollTop || options.closePanels===true);
   currentPage=page;
-  closeInfoPanels();
-  closeNavDrawer();
-  closeProfileDrawer();
+  if(shouldClosePanels){
+    closeInfoPanels();
+    closeNavDrawer();
+    closeProfileDrawer();
+  }
   document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
   el(page)?.classList.add('active');
@@ -921,7 +929,7 @@ function setPage(page, options={}){
   if(page==='exchange') loadExchangeRequest();
   if(page==='notifications') loadFirebaseAnnouncements();
   updateTopbarSlogan();
-  if(options.scrollTop!==false) scrollCurrentPageToTop(options.behavior || 'auto');
+  if(shouldScrollTop) scrollCurrentPageToTop(options.behavior || 'auto');
 }
 function syncInfoButtons(){
   document.querySelectorAll('[data-info-toggle]').forEach(btn=>{
@@ -3496,6 +3504,26 @@ function isActiveMemberRecord(record={}){
   return !isBlockedMembershipStatus(status)
     && (status==='approved' || role==='admin' || role==='manager' || role==='yonetici' || !!record.isAdmin);
 }
+function membershipRecordMatchesSession(record,session=getMemberSession()){
+  if(!record || !session?.active) return false;
+  const recordIds=[record.uid,record.firebaseUid].filter(Boolean).map(String);
+  const sessionIds=[session.uid,session.firebaseUid].filter(Boolean).map(String);
+  if(recordIds.some(id=>sessionIds.includes(id))) return true;
+  if(record.sicil && session.sicil && String(record.sicil)===String(session.sicil)) return true;
+  const recordEmail=normalizeEmail(record.email || record.authEmail || record.ownerEmail);
+  const sessionEmail=normalizeEmail(session.email || session.authEmail);
+  return !!recordEmail && !!sessionEmail && recordEmail===sessionEmail;
+}
+function isProtectedAdminMembershipRecord(record={}){
+  const email=normalizeEmail(record.email || record.authEmail || record.ownerEmail);
+  const role=normalizeEmail(record.memberRole || record.type || record.role);
+  return !!record.isAdmin
+    || email===SEEDED_ADMIN_ACCOUNT.email
+    || String(record.sicil || '')===SEEDED_ADMIN_ACCOUNT.sicil
+    || role==='admin'
+    || role==='yonetici'
+    || role==='yönetici';
+}
 function adminSelectedMemberRecord(){
   return selectedMembershipAdminMode==='member' && selectedMembershipAdminRecord
     ? selectedMembershipAdminRecord
@@ -3629,7 +3657,8 @@ function ensureFirebaseAdminSession(password){
       firebaseLastMessage='Firebase yanıtı gecikti. Test için admin oturumu bu cihazda açıldı; kalıcı onay sistemi için Firebase Authentication > Email/Password aktif edilmeli.';
       if(el('memberLoginStatus')) el('memberLoginStatus').textContent=firebaseLastMessage;
       renderMembershipPreview();
-      setPage('home');
+      if(currentPage==='membership') setPage('home');
+      else updateTopbarSlogan();
     }, 4500);
     return true;
   }catch(error){
@@ -3830,13 +3859,13 @@ function normalizeForumReply(raw={}){
 function activeForumTopics(){
   return firebaseForumTopics
     .map(normalizeForumTopic)
-    .filter(item=>item.status!=='deleted')
+    .filter(item=>item.status!=='deleted' && !isForumAuthorBlocked(item))
     .sort((a,b)=>(b.lastActivityAt || b.createdAt)-(a.lastActivityAt || a.createdAt));
 }
 function activeForumReplies(){
   return firebaseForumReplies
     .map(normalizeForumReply)
-    .filter(item=>item.status!=='deleted')
+    .filter(item=>item.status!=='deleted' && !isForumAuthorBlocked(item))
     .sort((a,b)=>a.createdAt-b.createdAt);
 }
 function selectedForumTopic(){
@@ -3847,6 +3876,42 @@ function canModerateForumItem(item){
   if(!session?.active || isGuestSession(session)) return false;
   if(isAdminSession(session)) return true;
   return !!item && String(item.authorUid || '') && String(item.authorUid)===String(session.uid || session.firebaseUid || '');
+}
+function forumAuthorBlockKey(item){
+  return String(item?.authorUid || item?.authorNick || item?.authorName || '').trim();
+}
+function forumBlockedAuthors(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(FORUM_BLOCKED_AUTHORS_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  }catch(error){
+    localStorage.removeItem(FORUM_BLOCKED_AUTHORS_KEY);
+    return [];
+  }
+}
+function saveForumBlockedAuthors(list=[]){
+  const unique=[...new Set(list.map(String).filter(Boolean))];
+  localStorage.setItem(FORUM_BLOCKED_AUTHORS_KEY, JSON.stringify(unique));
+  scheduleUserDataSync('forum-blocked-authors');
+}
+function isForumAuthorBlocked(item){
+  const key=forumAuthorBlockKey(item);
+  return !!key && forumBlockedAuthors().includes(key);
+}
+function canUseForumSafetyAction(item){
+  const session=getMemberSession();
+  if(!session?.active || isGuestSession(session) || !item) return false;
+  const ownId=String(session.uid || session.firebaseUid || '');
+  return !ownId || String(item.authorUid || '')!==ownId;
+}
+function forumSafetyButtons(item,kind){
+  if(!canUseForumSafetyAction(item)) return '';
+  const blockKey=forumAuthorBlockKey(item);
+  const name=item.authorName || 'Kullanıcı';
+  if(kind==='reply'){
+    return `<button type="button" class="forum-soft-btn" data-forum-report-reply="${esc(item.replyId)}">Şikayet Et</button>${blockKey ? `<button type="button" class="forum-soft-btn" data-forum-block-author="${esc(blockKey)}" data-forum-block-name="${esc(name)}">Kullanıcıyı Engelle</button>` : ''}`;
+  }
+  return `<button type="button" class="forum-soft-btn" data-forum-report-topic="${esc(item.topicId)}">Şikayet Et</button>${blockKey ? `<button type="button" class="forum-soft-btn" data-forum-block-author="${esc(blockKey)}" data-forum-block-name="${esc(name)}">Kullanıcıyı Engelle</button>` : ''}`;
 }
 function saveForumDraft(){
   const draft={
@@ -4000,6 +4065,57 @@ function deleteFirebaseForumReply(topicId,replyId){
     return false;
   }
 }
+function reportFirebaseForumContent(payload){
+  const bridge=firebaseBridge();
+  if(!bridge || typeof bridge.reportForumContent!=='function'){
+    setForumStatus('Şikayet kaydı için Firebase forum köprüsünün güncel sürümü gerekli.', 'warn');
+    return false;
+  }
+  const reason=prompt('Şikayet nedenini kısaca yazabilirsin:', 'Uygunsuz içerik');
+  if(reason===null) return false;
+  try{
+    bridge.reportForumContent(JSON.stringify({...payload,reason:String(reason || '').trim() || 'Uygunsuz içerik'}));
+    setForumStatus('Şikayet moderasyona gönderiliyor...');
+    return true;
+  }catch(error){
+    setForumStatus('Şikayet gönderilemedi.', 'warn');
+    return false;
+  }
+}
+function reportForumTopic(topicId){
+  const topic=activeForumTopics().find(item=>item.topicId===topicId || item.id===topicId);
+  if(!topic) return false;
+  return reportFirebaseForumContent({
+    targetType:'topic',
+    topicId:topic.topicId,
+    targetAuthorUid:topic.authorUid,
+    targetAuthorName:topic.authorName,
+    title:topic.title
+  });
+}
+function reportForumReply(replyId){
+  const reply=activeForumReplies().find(item=>item.replyId===replyId || item.id===replyId);
+  if(!reply) return false;
+  return reportFirebaseForumContent({
+    targetType:'reply',
+    topicId:reply.topicId || selectedForumTopicId,
+    replyId:reply.replyId,
+    targetAuthorUid:reply.authorUid,
+    targetAuthorName:reply.authorName
+  });
+}
+function blockForumAuthor(authorKey,authorName='Kullanıcı'){
+  const key=String(authorKey || '').trim();
+  if(!key) return;
+  if(!confirm(`${authorName} adlı kullanıcının forum içeriklerini bu cihazda gizlemek istiyor musun?`)) return;
+  saveForumBlockedAuthors([...forumBlockedAuthors(), key]);
+  setForumStatus(`${authorName} için içerikler gizlendi.`);
+  if(selectedForumTopic() && isForumAuthorBlocked(selectedForumTopic())){
+    selectedForumTopicId='';
+    firebaseForumReplies=[];
+  }
+  renderForum();
+}
 function selectForumTopic(topicId,loadReplies=true){
   selectedForumTopicId=String(topicId || '');
   firebaseForumReplies=[];
@@ -4073,15 +4189,23 @@ function renderForumTopicDetail(){
     return;
   }
   const replies=activeForumReplies();
-  const topicActions=canModerateForumItem(topic)
-    ? `<div class="forum-detail-actions"><button type="button" class="forum-danger-btn" data-forum-delete-topic="${esc(topic.topicId)}">Konuyu Kaldır</button></div>`
+  const topicModeration=canModerateForumItem(topic)
+    ? `<button type="button" class="forum-danger-btn" data-forum-delete-topic="${esc(topic.topicId)}">Konuyu Kaldır</button>`
+    : '';
+  const topicSafety=forumSafetyButtons(topic,'topic');
+  const topicActions=(topicModeration || topicSafety)
+    ? `<div class="forum-detail-actions">${topicModeration}${topicSafety}</div>`
     : '';
   const replyMarkup=firebaseForumRepliesLoading
     ? '<div class="forum-empty">Cevaplar yükleniyor...</div>'
     : replies.length
       ? `<div class="forum-reply-list">${replies.map(reply=>{
-          const replyActions=canModerateForumItem(reply)
-            ? `<div class="forum-reply-actions"><button type="button" class="forum-danger-btn" data-forum-delete-reply="${esc(reply.replyId)}">Cevabı Kaldır</button></div>`
+          const replyModeration=canModerateForumItem(reply)
+            ? `<button type="button" class="forum-danger-btn" data-forum-delete-reply="${esc(reply.replyId)}">Cevabı Kaldır</button>`
+            : '';
+          const replySafety=forumSafetyButtons(reply,'reply');
+          const replyActions=(replyModeration || replySafety)
+            ? `<div class="forum-reply-actions">${replyModeration}${replySafety}</div>`
             : '';
           return `<div class="forum-reply-card">
             <span class="forum-reply-avatar">${esc(forumAuthorInitial(reply.authorName))}</span>
@@ -4753,9 +4877,11 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
       if(payload.removedFromMembers || isBlockedMembershipStatus(payload.applicationStatus)){
         firebaseMembers=firebaseMembers.filter(item=>(item.uid || item.firebaseUid)!==uid);
         const session=getMemberSession();
-        if(session?.uid===uid || session?.firebaseUid===uid){
+        if(!isAdminSession(session) && (session?.uid===uid || session?.firebaseUid===uid)){
           clearMemberSession();
           setMembershipAuthMode('login');
+        }else if(isAdminSession(session) && (session?.uid===uid || session?.firebaseUid===uid) && el('membershipAdminNotice')){
+          el('membershipAdminNotice').textContent='Yönetici oturumu korunuyor. Aktif yönetici kaydı üyelikten çıkarılamaz.';
         }
       }
       if(selectedMembershipAdminRecord && membershipAdminRecordKey(selectedMembershipAdminRecord)===String(uid||'')){
@@ -4768,6 +4894,9 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
       firebasePendingLoaded=false;
       loadFirebasePendingMembers(true);
       loadFirebaseMembers(true);
+      if(el('membershipAdminNotice')) el('membershipAdminNotice').textContent=message || 'Üyelik işlemi Firebase üzerinde tamamlandı.';
+    }else if(el('membershipAdminNotice')){
+      el('membershipAdminNotice').textContent=message || 'Firebase üyelik işlemi tamamlanamadı. Admin oturumu korunuyor.';
     }
     renderMembershipPreview();
     return;
@@ -4896,6 +5025,10 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
     renderForum();
     return;
   }
+  if(action==='reportForumContent'){
+    setForumStatus(message || (success ? 'Şikayet moderasyon kuyruğuna gönderildi.' : 'Şikayet gönderilemedi.'), success ? 'info' : 'warn');
+    return;
+  }
   if(action==='loadAnnouncements'){
     firebaseAnnouncementsLoading=false;
     if(success && Array.isArray(payload)){
@@ -4986,7 +5119,8 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
         firebasePendingLoaded=false;
         loadFirebasePendingMembers(true);
       loadFirebaseMembers(true);
-      setPage('home');
+      if(currentPage==='membership') setPage('home');
+      else updateTopbarSlogan();
     }else{
       openAdminSessionLocally();
       firebasePendingLoaded=false;
@@ -4994,7 +5128,8 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
         ? 'Firebase Authentication henüz aktif değil. Test için admin oturumu bu cihazda açıldı; farklı telefondan onay için Firebase Console > Authentication > Email/Password aktif edilmeli.'
         : `${message || 'Firebase admin senkronu tamamlanamadı.'} Yerel admin oturumu açık kalacak.`;
       if(el('memberLoginStatus')) el('memberLoginStatus').textContent=fallbackMessage;
-      setPage('home');
+      if(currentPage==='membership') setPage('home');
+      else updateTopbarSlogan();
       renderMembershipPreview();
       return;
     }
@@ -5038,7 +5173,8 @@ window.onFirebaseBridgeResult=function(action,success,payloadJson,message){
       syncMembershipRecordToProfile(record,{activate:true,feedback:true});
       window.setTimeout(()=>loadUserDataSync(true),250);
       renderMembershipPreview();
-      setPage('home');
+      if(action==='loginMember') setPage('home');
+      else updateTopbarSlogan();
     }else{
       if(action==='loginMember') clearMemberSession();
       renderMembershipPreview();
@@ -5649,8 +5785,21 @@ function updateMembershipDecision(nextStatus){
   const current=selectedMember || selectedApplication;
   const selectionMode=selectedMember ? 'member' : 'application';
   const isMemberAction=['removed','make_admin','admin','remove_admin'].includes(nextStatus);
+  if(isMemberAction && !selectedMember){
+    alert('Bu işlem için önce Üye Listesi içinden aktif üyeyi seç. Onay kuyruğundaki başvurular için Onayla veya Reddet kullan.');
+    return;
+  }
+  const hasExplicitTarget=!!selectedMember || !!(selectedMembershipAdminMode==='application' && selectedMembershipAdminRecord) || !!latestFirebasePendingMember() || !!latestPendingMembership();
   if(!current.fullName || !current.sicil){
     alert(isMemberAction ? 'Bu işlem için önce Üye Listesi veya Onay Kuyruğu içinden kişiyi seç.' : 'Önce üyelik başvurusu kaydedilmeli.');
+    return;
+  }
+  if(!hasExplicitTarget && membershipRecordMatchesSession(current)){
+    alert('İşlem yapılacak başvuru veya üye seçilemedi. Önce Onay Kuyruğu ya da Üye Listesi içinden kişiyi seç.');
+    return;
+  }
+  if(nextStatus==='removed' && (membershipRecordMatchesSession(current) || isProtectedAdminMembershipRecord(current))){
+    alert('Güvenlik nedeniyle aktif yönetici hesabı veya yönetici kaydı üyelikten çıkarılamaz. Önce farklı bir standart üyeyi seç.');
     return;
   }
   const reviewNote=String(el('membershipReviewNote')?.value || '').trim();
@@ -5658,10 +5807,18 @@ function updateMembershipDecision(nextStatus){
     return;
   }
   const updated=updateMembershipRequestStatus(current,nextStatus,reviewNote);
-  saveMembershipRecord(updated);
-  applyMembershipForm(updated);
+  const touchesCurrentSession=membershipRecordMatchesSession(updated);
+  if(touchesCurrentSession){
+    saveMembershipRecord(updated);
+    applyMembershipForm(updated);
+  }
   if(isMemberAction) setMembershipAdminSelection(updated,selectionMode);
   else setMembershipAdminSelection(null,'application');
+  const notice=el('membershipAdminNotice');
+  if(notice){
+    const name=updated.fullName || updated.sicil || 'Seçili kayıt';
+    notice.textContent=`${name} için üyelik işlemi tamamlandı. Admin oturumu korunuyor.`;
+  }
   renderMembershipPreview(updated.savedAt || updated.reviewedAt);
 }
 function fillMembershipFromProfile(){
@@ -6986,6 +7143,21 @@ if(el('forumTopicDetail')) el('forumTopicDetail').addEventListener('click',event
   const deleteReply=event.target.closest('[data-forum-delete-reply]');
   if(deleteReply){
     deleteFirebaseForumReply(selectedForumTopicId,deleteReply.dataset.forumDeleteReply);
+    return;
+  }
+  const reportTopic=event.target.closest('[data-forum-report-topic]');
+  if(reportTopic){
+    reportForumTopic(reportTopic.dataset.forumReportTopic);
+    return;
+  }
+  const reportReply=event.target.closest('[data-forum-report-reply]');
+  if(reportReply){
+    reportForumReply(reportReply.dataset.forumReportReply);
+    return;
+  }
+  const blockAuthor=event.target.closest('[data-forum-block-author]');
+  if(blockAuthor){
+    blockForumAuthor(blockAuthor.dataset.forumBlockAuthor, blockAuthor.dataset.forumBlockName || 'Kullanıcı');
   }
 });
 ['pointerdown','touchstart','keydown','scroll'].forEach(evt=>window.addEventListener(evt, handleActivity, {passive:true}));

@@ -290,6 +290,17 @@
     return adminSnap.val()===true;
   }
 
+  function isProtectedAdminRecord(record={}){
+    const email=normalizeEmail(record.email || record.authEmail || record.ownerEmail);
+    const role=clean(record.memberRole || record.type || record.role).toLowerCase();
+    return !!record.isAdmin
+      || email===SEEDED_ADMIN.email
+      || clean(record.sicil)===SEEDED_ADMIN.sicil
+      || role==='admin'
+      || role==='yonetici'
+      || role==='yönetici';
+  }
+
   function forumTopicFromSnapshot(child){
     const value=child && child.val ? child.val() : null;
     if(!value || typeof value!=='object') return null;
@@ -477,6 +488,21 @@
     notify(action,true,{...data,uid,firebaseUid:uid},'Firebase admin oturumu açıldı. Onay kuyruğu okunabilir.');
   }
 
+  async function restoreSeededAdminAfterApplication(){
+    const result=await auth.signInWithEmailAndPassword(SEEDED_ADMIN.email,SEEDED_ADMIN.password);
+    const uid=result.user?.uid || SEEDED_ADMIN.uid;
+    await db.ref().update({
+      [`admins/${uid}`]:true,
+      [`admins/${SEEDED_ADMIN.uid}`]:true,
+      [`members/${uid}/isAdmin`]:true,
+      [`members/${uid}/memberRole`]:'admin',
+      [`members/${uid}/type`]:'admin',
+      [`membershipApplications/${uid}/isAdmin`]:true,
+      [`membershipApplications/${uid}/memberRole`]:'admin',
+      [`membershipApplications/${uid}/type`]:'admin'
+    });
+  }
+
   window.FirebaseBridge={
     isAvailable(){
       return init();
@@ -494,6 +520,8 @@
           return;
         }
         const authEmail=authEmailFor(sicil,payload.email);
+        const previousUser=auth.currentUser;
+        const shouldRestoreSeededAdmin=normalizeEmail(previousUser?.email)===SEEDED_ADMIN.email;
         try{
           let result;
           try{
@@ -508,6 +536,13 @@
           const uid=result.user?.uid || fallbackUid(sicil,payload.email);
           const data=memberMapFromPayload(payload,uid,authEmail);
           await db.ref(`membershipApplications/${uid}`).set(data);
+          if(shouldRestoreSeededAdmin){
+            try{
+              await restoreSeededAdminAfterApplication();
+            }catch(restoreError){
+              console.warn('Seeded admin session restore failed after membership application', restoreError);
+            }
+          }
           const safePayload={...payload};
           delete safePayload.password;
           delete safePayload.passwordConfirm;
@@ -632,6 +667,10 @@
           const removeFromMembers=isBlocked(normalized);
           const appSnap=await db.ref(`membershipApplications/${safeUid}`).once('value');
           const applicationData=recordFromSnapshot(appSnap) || {uid:safeUid,firebaseUid:safeUid};
+          const actingUser=auth.currentUser;
+          if(removeFromMembers && (safeUid===actingUser?.uid || safeUid===SEEDED_ADMIN.uid || isProtectedAdminRecord(applicationData))){
+            throw new Error('Aktif yönetici hesabı veya yönetici kaydı üyelikten çıkarılamaz. Önce farklı bir standart üyeyi seçin.');
+          }
           const wasApproved=clean(applicationData.applicationStatus).toLowerCase()==='approved';
           const updated={
             ...applicationData,
@@ -904,6 +943,44 @@
           };
           await db.ref().update(updates);
           notify(action,true,{topicId:safeTopicId,replyId:safeReplyId},'Forum cevabı kaldırıldı.');
+        }catch(error){
+          notify(action,false,{},firebaseMessage(error));
+        }
+      })();
+    },
+
+    reportForumContent(payloadJson){
+      const action='reportForumContent';
+      if(!init()) return notify(action,false,{},'Firebase web baglantisi hazir degil.');
+      const user=auth.currentUser;
+      if(!user) return notify(action,false,{},'Forum sikayeti icin once uye girisi yapilmali.');
+      (async()=>{
+        try{
+          await approvedForumMember(user);
+          const payload=JSON.parse(payloadJson || '{}');
+          const targetType=clean(payload.targetType)==='reply' ? 'reply' : 'topic';
+          const topicId=clean(payload.topicId);
+          const replyId=clean(payload.replyId);
+          if(!topicId) return notify(action,false,{},'Sikayet icin konu kimligi eksik.');
+          if(targetType==='reply' && !replyId) return notify(action,false,{},'Sikayet icin cevap kimligi eksik.');
+          const ref=db.ref('forumReports').push();
+          const data={
+            id:ref.key,
+            reportId:ref.key,
+            reporterUid:user.uid,
+            reporterEmail:user.email || '',
+            targetType,
+            topicId,
+            replyId:targetType==='reply' ? replyId : '',
+            targetAuthorUid:clean(payload.targetAuthorUid),
+            targetAuthorName:forumClean(payload.targetAuthorName || '',80),
+            title:forumClean(payload.title || '',160),
+            reason:forumClean(payload.reason || 'Uygunsuz icerik',400),
+            status:'open',
+            createdAt:now()
+          };
+          await ref.set(data);
+          notify(action,true,data,'Sikayet moderasyon kuyruguna gonderildi.');
         }catch(error){
           notify(action,false,{},firebaseMessage(error));
         }
