@@ -1,1234 +1,1517 @@
-(function(){
-  if(window.FirebaseBridge && typeof window.FirebaseBridge.isAvailable === 'function' && window.FirebaseBridge.isAvailable()){
-    return;
-  }
 
-  const FIREBASE_CONFIG={
-    apiKey:'AIzaSyC3-hCqZQl50B3Qc-mupsSYfDXYpMJthyI',
-    authDomain:'tcddisciplatformu.firebaseapp.com',
-    databaseURL:'https://tcddisciplatformu-default-rtdb.europe-west1.firebasedatabase.app',
-    projectId:'tcddisciplatformu',
-    storageBucket:'tcddisciplatformu.firebasestorage.app',
-    messagingSenderId:'925070278216',
-    appId:'1:925070278216:android:d52be8a7d28cdf913ee27d'
-  };
-  const SEEDED_ADMIN={
-    uid:'6Bpi0tMiMcPK0urWpRePHckXxnk1',
-    email:'kizilgolgemm@gmail.com',
-    sicil:'87265',
-    fullName:'Seckin Caglayan',
-    password:'Sc458506'
-  };
-  const PROFILE_FIELD_KEYS=[
-    'profileId','profileSicil','profileFullName','profileBolge','profileCompany',
-    'profileWorkerType','profileSkala','profileCalismaModeli','profileDegree',
-    'profileKademe','profileGirisYili','profileGirisAy','profileMilitaryAfterStart',
-    'profileCarryAnnualLeave','profileTerfiBilgisi','profilePostabasi'
-  ];
-
-  let app=null;
-  let auth=null;
-  let db=null;
-
-  function init(){
-    if(auth && db) return true;
-    if(!window.firebase || !window.firebase.initializeApp) return false;
-    try{
-      app=window.firebase.apps && window.firebase.apps.length
-        ? window.firebase.app()
-        : window.firebase.initializeApp(FIREBASE_CONFIG);
-      auth=window.firebase.auth(app);
-      if(auth.setPersistence && window.firebase.auth.Auth?.Persistence?.LOCAL){
-        auth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL).catch(error=>{
-          console.warn('Firebase auth persistence could not be set', error);
-        });
-      }
-      db=window.firebase.database(app);
-      return true;
-    }catch(error){
-      console.warn('Firebase web bridge init failed', error);
-      return false;
-    }
-  }
-
-  function notify(action,success,payload,message){
-    const data=payload===undefined || payload===null ? {} : payload;
-    const payloadJson=JSON.stringify(data);
-    window.setTimeout(()=>{
-      if(typeof window.onFirebaseBridgeResult === 'function'){
-        window.onFirebaseBridgeResult(action,!!success,payloadJson,message || '');
-      }
-    },0);
-  }
-
-  function clean(value){
-    const text=String(value ?? '').trim();
-    return text.toLowerCase()==='null' ? '' : text;
-  }
-
-  function normalizeEmail(value){
-    return clean(value).toLowerCase();
-  }
-
-  function isRealEmail(value){
-    const email=normalizeEmail(value);
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !email.endsWith('.local');
-  }
-
-  function approvalEmailPayload(record,uid){
-    const to=normalizeEmail(record.email || record.ownerEmail || record.contactEmail || record.authEmail);
-    if(!isRealEmail(to)) return null;
-    const fullName=clean(record.fullName || record.name || record.ownerName) || 'Değerli üyemiz';
-    const sicil=clean(record.sicil || record.personnelNo);
-    const sentAt=now();
-    const htmlName=fullName
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;');
-    return {
-      uid:clean(uid),
-      to,
-      type:'membership_approved',
-      template:'membershipApproved',
-      status:'pending',
-      subject:'Üyeliğiniz Onaylanmıştır',
-      createdAt:sentAt,
-      data:{fullName,sicil},
-      message:{
-        subject:'Üyeliğiniz Onaylanmıştır',
-        text:`Merhaba ${fullName},\n\nTCDD İşçi Platformu üyelik başvurunuz onaylanmıştır. Artık üye girişi yaparak platform alanlarını kullanabilirsiniz.\n\nTCDD İşçi Platformu`,
-        html:`<p>Merhaba <strong>${htmlName}</strong>,</p><p>TCDD İşçi Platformu üyelik başvurunuz onaylanmıştır. Artık üye girişi yaparak platform alanlarını kullanabilirsiniz.</p><p><strong>TCDD İşçi Platformu</strong></p>`
-      }
-    };
-  }
-
-  function authEmailFor(sicil,email){
-    const safeEmail=normalizeEmail(email);
-    if(safeEmail && safeEmail.includes('@')) return safeEmail;
-    const safeSicil=clean(sicil).replace(/[^0-9A-Za-z]/g,'');
-    return `${safeSicil || 'uye' + Date.now()}@tcddisciplatformu.local`;
-  }
-
-  function fallbackUid(sicil,email){
-    let key=clean(sicil) || normalizeEmail(email);
-    key=key.replace(/[^0-9A-Za-z]+/g,'_');
-    return `pending_${key || 'uye_' + Date.now()}`;
-  }
-
-  function now(){
-    return Date.now();
-  }
-
-  function putProfileFields(target,source){
-    PROFILE_FIELD_KEYS.forEach(key=>{
-      if(Object.prototype.hasOwnProperty.call(source || {},key)){
-        target[key]=clean(source[key]);
-      }
-    });
-  }
-
-  function memberMapFromPayload(payload,uid,authEmail){
-    const data={
-      uid,
-      authEmail,
-      fullName:clean(payload.fullName),
-      sicil:clean(payload.sicil),
-      company:clean(payload.company),
-      role:clean(payload.role),
-      unit:clean(payload.unit),
-      city:clean(payload.city),
-      phone:clean(payload.phone),
-      email:clean(payload.email),
-      type:clean(payload.type) || 'standart',
-      notifyChannel:clean(payload.notifyChannel),
-      note:clean(payload.note),
-      applicationStatus:'pending_review',
-      memberRole:'member',
-      isAdmin:false,
-      notifyConsent:!!payload.notifyConsent,
-      contactConsent:!!payload.contactConsent,
-      conductConsent:!!payload.conductConsent,
-      kvkkInfoRead:!!payload.kvkkInfoRead,
-      kvkkConsent:!!payload.kvkkConsent,
-      source:'web',
-      submittedAt:now(),
-      updatedAt:now()
-    };
-    putProfileFields(data,payload);
-    return data;
-  }
-
-  function recordFromSnapshot(snapshot,fallbackStatus='draft'){
-    const value=snapshot && snapshot.val ? snapshot.val() : null;
-    if(!value || typeof value !== 'object') return null;
-    const key=snapshot.key || value.uid || '';
-    return {
-      ...value,
-      uid:key,
-      firebaseUid:value.uid || key,
-      type:value.type || 'standart',
-      applicationStatus:value.applicationStatus || fallbackStatus,
-      memberRole:value.memberRole || 'member',
-      isAdmin:!!value.isAdmin
-    };
-  }
-
-  function isBlocked(status){
-    const normalized=String(status || '').toLowerCase();
-    return normalized==='removed' || normalized==='rejected';
-  }
-
-  function isPending(status){
-    const normalized=String(status || '').toLowerCase();
-    return !normalized
-      || normalized==='draft'
-      || normalized==='pending'
-      || normalized==='submitted'
-      || normalized==='pending_review'
-      || normalized==='revision_requested';
-  }
-
-  function isApproved(record){
-    const status=String(record?.applicationStatus || '').toLowerCase();
-    const role=String(record?.memberRole || '').toLowerCase();
-    return status==='approved' || role==='admin' || !!record?.isAdmin;
-  }
-
-  async function signInAndLoadMember(action,email,password){
-    const result=await auth.signInWithEmailAndPassword(email,password);
-    const user=result.user;
-    if(!user) throw new Error('Firebase oturumu açılamadı.');
-    await loadMemberDocument(action,user.uid);
-  }
-
-  async function loadMemberDocument(action,uid){
-    const memberSnap=await db.ref(`members/${uid}`).once('value');
-    let record=recordFromSnapshot(memberSnap);
-    if(!record){
-      const appSnap=await db.ref(`membershipApplications/${uid}`).once('value');
-      record=recordFromSnapshot(appSnap);
-    }
-    if(!record){
-      notify(action,false,{},'Üyelik kaydı bulunamadı.');
-      return;
-    }
-    if(!isApproved(record) || isBlocked(record.applicationStatus)){
-      notify(action,false,record,'Üyelik onaylı değil veya yönetim tarafından kapatılmış.');
-      return;
-    }
-    notify(action,true,record,'Üyelik kaydı alındı.');
-  }
-
-  function exchangeCityKey(value){
-    return clean(value)
-      .toLocaleLowerCase('tr-TR')
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g,'')
-      .replace(/ı/g,'i')
-      .replace(/[^a-z0-9]+/g,'_')
-      .replace(/^_+|_+$/g,'');
-  }
-
-  function exchangeMapFromPayload(payload,user){
-    const currentCity=clean(payload.currentCity);
-    const targetCity=clean(payload.targetCity);
-    const ownerEmail=clean(payload.ownerEmail);
-    const email=clean(payload.email);
-    const ownerPhone=clean(payload.ownerPhone);
-    const phone=clean(payload.phone);
-    return {
-      uid:user.uid,
-      authEmail:user.email || '',
-      ownerName:clean(payload.ownerName),
-      ownerSicil:clean(payload.ownerSicil),
-      ownerEmail:ownerEmail || email,
-      email:email || ownerEmail,
-      ownerPhone:ownerPhone || phone,
-      phone:phone || ownerPhone,
-      currentRegion:clean(payload.currentRegion),
-      currentCity,
-      currentDistrict:clean(payload.currentDistrict),
-      targetRegion:clean(payload.targetRegion),
-      targetCity,
-      targetDistrict:clean(payload.targetDistrict),
-      currentCityKey:exchangeCityKey(currentCity),
-      targetCityKey:exchangeCityKey(targetCity),
-      company:clean(payload.company),
-      role:clean(payload.role),
-      workType:clean(payload.workType),
-      notify:clean(payload.notify),
-      note:clean(payload.note),
-      status:'active',
-      updatedAt:now()
-    };
-  }
-
-  function forumClean(value,maxLength){
-    const text=clean(value).replace(/\s+\n/g,'\n').replace(/\n{3,}/g,'\n\n');
-    return maxLength ? text.slice(0,maxLength) : text;
-  }
-
-  function forumAuthorNick(payload){
-    const nick=forumClean(payload.authorNick || payload.authorName || '',32);
-    return nick || 'Demiryolcu';
-  }
-
-  async function approvedForumMember(user){
-    if(!user) throw new Error('Forum için önce üye girişi yapılmalı.');
-    const memberSnap=await db.ref(`members/${user.uid}`).once('value');
-    const member=recordFromSnapshot(memberSnap);
-    if(!member || (!isApproved(member) && normalizeEmail(user.email)!==SEEDED_ADMIN.email)){
-      throw new Error('Forum için onaylı üyelik gerekir.');
-    }
-    return member;
-  }
-
-  async function currentUserIsAdmin(user){
-    if(!user) return false;
-    if(normalizeEmail(user.email)===SEEDED_ADMIN.email) return true;
-    const adminSnap=await db.ref(`members/${user.uid}/isAdmin`).once('value');
-    return adminSnap.val()===true;
-  }
-
-  function isProtectedAdminRecord(record={}){
-    const email=normalizeEmail(record.email || record.authEmail || record.ownerEmail);
-    const role=clean(record.memberRole || record.type || record.role).toLowerCase();
-    return !!record.isAdmin
-      || email===SEEDED_ADMIN.email
-      || clean(record.sicil)===SEEDED_ADMIN.sicil
-      || role==='admin'
-      || role==='yonetici'
-      || role==='yönetici';
-  }
-
-  function forumTopicFromSnapshot(child){
-    const value=child && child.val ? child.val() : null;
-    if(!value || typeof value!=='object') return null;
-    const topicId=child.key || value.topicId || value.id || '';
-    return {...value,id:topicId,topicId};
-  }
-
-  function forumReplyFromSnapshot(child,topicId){
-    const value=child && child.val ? child.val() : null;
-    if(!value || typeof value!=='object') return null;
-    const replyId=child.key || value.replyId || value.id || '';
-    return {...value,id:replyId,replyId,topicId:value.topicId || topicId};
-  }
-
-  function forumTopicMapFromPayload(payload,user,member,topicId){
-    const title=forumClean(payload.title,120);
-    const body=forumClean(payload.body,1800);
-    if(title.length<4) throw new Error('Konu başlığı en az 4 karakter olmalı.');
-    if(body.length<10) throw new Error('Konu metni en az 10 karakter olmalı.');
-    return {
-      id:topicId,
-      topicId,
-      category:clean(payload.category) || 'gundem',
-      title,
-      body,
-      authorUid:user.uid,
-      authorName:forumAuthorNick(payload),
-      authorNick:forumAuthorNick(payload),
-      authorSicil:'',
-      authorRole:forumClean(payload.authorRole || (member.isAdmin ? 'Yönetici' : 'Üye'),40),
-      status:'active',
-      replyCount:0,
-      createdAt:now(),
-      updatedAt:now(),
-      lastActivityAt:now()
-    };
-  }
-
-  function forumReplyMapFromPayload(payload,user,member,replyId){
-    const body=forumClean(payload.body,1200);
-    if(body.length<3) throw new Error('Cevap metni en az 3 karakter olmalı.');
-    return {
-      id:replyId,
-      replyId,
-      topicId:clean(payload.topicId),
-      body,
-      authorUid:user.uid,
-      authorName:forumAuthorNick(payload),
-      authorNick:forumAuthorNick(payload),
-      authorSicil:'',
-      authorRole:forumClean(payload.authorRole || (member.isAdmin ? 'Yönetici' : 'Üye'),40),
-      status:'active',
-      createdAt:now()
-    };
-  }
-
-  async function canModifyForumItem(user,item){
-    if(!user || !item) return false;
-    if(await currentUserIsAdmin(user)) return true;
-    return clean(item.authorUid)===user.uid;
-  }
-
-  function announcementFromSnapshot(child){
-    const value=child && child.val ? child.val() : null;
-    if(!value || typeof value!=='object') return null;
-    const announcementId=child.key || value.announcementId || value.id || '';
-    return {
-      ...value,
-      id:announcementId,
-      announcementId,
-      title:clean(value.title),
-      body:clean(value.body || value.text),
-      label:clean(value.label) || 'Duyuru',
-      href:clean(value.href),
-      target:clean(value.target || value.publishTarget) || 'app_platform',
-      audience:clean(value.audience) || 'installed_members',
-      channel:clean(value.channel) || 'app',
-      whatsappText:clean(value.whatsappText),
-      imageUrl:clean(value.imageUrl),
-      imageDataUrl:clean(value.imageDataUrl),
-      status:clean(value.status) || 'active',
-      createdAt:Number(value.createdAt || 0),
-      installTokenCount:Number(value.installTokenCount || value.tokenCount || 0),
-      broadcastStatus:clean(value.broadcastStatus),
-      pushSuccessCount:Number(value.pushSuccessCount || value.successCount || 0),
-      pushFailureCount:Number(value.pushFailureCount || value.failureCount || 0)
-    };
-  }
-
-  function enabledNotificationTokenCount(snapshot){
-    let count=0;
-    if(!snapshot || !snapshot.forEach) return 0;
-    snapshot.forEach(userSnap=>{
-      userSnap.forEach(tokenSnap=>{
-        const value=tokenSnap.val && tokenSnap.val();
-        if(value && value.enabled===true && clean(value.token)) count+=1;
-      });
-    });
-    return count;
-  }
-
-  function announcementMapFromPayload(payload,user,announcementId){
-    const title=clean(payload.title).slice(0,90);
-    const body=clean(payload.body || payload.text).slice(0,240);
-    if(title.length<3) throw new Error('Duyuru başlığı en az 3 karakter olmalı.');
-    if(body.length<6) throw new Error('Duyuru açıklaması en az 6 karakter olmalı.');
-    return {
-      id:announcementId,
-      announcementId,
-      title,
-      body,
-      href:clean(payload.href).slice(0,420),
-      label:clean(payload.label).slice(0,24) || 'Duyuru',
-      icon:clean(payload.icon) || 'bell',
-      target:clean(payload.target || payload.publishTarget).slice(0,24) || 'app_platform',
-      audience:clean(payload.audience).slice(0,32) || 'installed_members',
-      channel:clean(payload.channel).slice(0,20) || 'app',
-      whatsappText:clean(payload.whatsappText).slice(0,600),
-      imageUrl:clean(payload.imageUrl).slice(0,700),
-      imageDataUrl:clean(payload.imageDataUrl).slice(0,1200000),
-      status:'active',
-      source:'admin',
-      authorUid:user.uid,
-      createdAt:now(),
-      updatedAt:now()
-    };
-  }
-  function announcementUpdateMapFromPayload(payload,user,announcementId,existing={}){
-    const data=announcementMapFromPayload(payload,user,announcementId);
-    data.createdAt=Number(existing.createdAt || data.createdAt || now());
-    data.authorUid=clean(existing.authorUid) || data.authorUid;
-    data.updatedAt=now();
-    return data;
-  }
-
-  async function forumDeletionUpdatesForUser(uid){
-    const updates={};
-    const indexSnap=await db.ref(`forumUserIndex/${uid}`).once('value');
-    const index=indexSnap.val() || {};
-    Object.keys(index.topics || {}).forEach(topicId=>{
-      updates[`forumTopics/${topicId}/status`]='deleted';
-      updates[`forumTopics/${topicId}/deletedAt`]=now();
-      updates[`forumTopics/${topicId}/deletedByUid`]=uid;
-    });
-    Object.entries(index.replies || {}).forEach(([topicId,replies])=>{
-      Object.keys(replies || {}).forEach(replyId=>{
-        updates[`forumReplies/${topicId}/${replyId}/status`]='deleted';
-        updates[`forumReplies/${topicId}/${replyId}/deletedAt`]=now();
-        updates[`forumReplies/${topicId}/${replyId}/deletedByUid`]=uid;
-      });
-    });
-    updates[`forumUserIndex/${uid}`]=null;
-    return updates;
-  }
-
-  async function writeSeededAdmin(action,user){
-    const data={
-      uid:SEEDED_ADMIN.uid,
-      firebaseUid:SEEDED_ADMIN.uid,
-      authEmail:SEEDED_ADMIN.email,
-      email:SEEDED_ADMIN.email,
-      fullName:SEEDED_ADMIN.fullName,
-      sicil:SEEDED_ADMIN.sicil,
-      company:'TCDD',
-      role:'Yönetici',
-      unit:'TCDD Isci Platformu',
-      city:'',
-      type:'admin',
-      memberRole:'admin',
-      isAdmin:true,
-      applicationStatus:'approved',
-      kvkkInfoRead:true,
-      kvkkConsent:true,
-      contactConsent:true,
-      conductConsent:true,
-      updatedAt:now()
-    };
-    const uid=user.uid || SEEDED_ADMIN.uid;
-    await db.ref().update({
-      [`membershipApplications/${uid}`]:data,
-      [`members/${uid}`]:data,
-      [`admins/${uid}`]:true,
-      [`admins/${SEEDED_ADMIN.uid}`]:true
-    });
-    notify(action,true,{...data,uid,firebaseUid:uid},'Firebase admin oturumu açıldı. Onay kuyruğu okunabilir.');
-  }
-
-  async function restoreSeededAdminAfterApplication(){
-    const result=await auth.signInWithEmailAndPassword(SEEDED_ADMIN.email,SEEDED_ADMIN.password);
-    const uid=result.user?.uid || SEEDED_ADMIN.uid;
-    await db.ref().update({
-      [`admins/${uid}`]:true,
-      [`admins/${SEEDED_ADMIN.uid}`]:true,
-      [`members/${uid}/isAdmin`]:true,
-      [`members/${uid}/memberRole`]:'admin',
-      [`members/${uid}/type`]:'admin',
-      [`membershipApplications/${uid}/isAdmin`]:true,
-      [`membershipApplications/${uid}/memberRole`]:'admin',
-      [`membershipApplications/${uid}/type`]:'admin'
-    });
-  }
-
-  window.FirebaseBridge={
-    isAvailable(){
-      return init();
-    },
-
-    submitMemberApplication(payloadJson){
-      const action='submitMemberApplication';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      (async()=>{
-        const payload=JSON.parse(payloadJson || '{}');
-        const sicil=clean(payload.sicil);
-        const password=String(payload.password || '');
-        if(!sicil || password.length<6){
-          notify(action,false,{},'Sicil ve en az 6 karakter parola zorunlu.');
-          return;
-        }
-        const authEmail=authEmailFor(sicil,payload.email);
-        const previousUser=auth.currentUser;
-        const shouldRestoreSeededAdmin=normalizeEmail(previousUser?.email)===SEEDED_ADMIN.email;
-        try{
-          let result;
-          try{
-            result=await auth.createUserWithEmailAndPassword(authEmail,password);
-          }catch(error){
-            if(error && error.code==='auth/email-already-in-use'){
-              result=await auth.signInWithEmailAndPassword(authEmail,password);
-            }else{
-              throw error;
-            }
-          }
-          const uid=result.user?.uid || fallbackUid(sicil,payload.email);
-          const data=memberMapFromPayload(payload,uid,authEmail);
-          await db.ref(`membershipApplications/${uid}`).set(data);
-          if(shouldRestoreSeededAdmin){
-            try{
-              await restoreSeededAdminAfterApplication();
-            }catch(restoreError){
-              console.warn('Seeded admin session restore failed after membership application', restoreError);
-            }
-          }
-          const safePayload={...payload};
-          delete safePayload.password;
-          delete safePayload.passwordConfirm;
-          notify(action,true,{...safePayload,...data,uid,firebaseUid:uid},'Başvuru Realtime Database onay kuyruğuna gönderildi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    loginMember(identifier,password){
-      const action='loginMember';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      (async()=>{
-        const safeIdentifier=clean(identifier);
-        const safePassword=String(password || '');
-        if(!safeIdentifier || !safePassword){
-          notify(action,false,{},'Sicil/e-posta ve parola zorunlu.');
-          return;
-        }
-        try{
-          if(safeIdentifier.includes('@')){
-            await signInAndLoadMember(action,normalizeEmail(safeIdentifier),safePassword);
-            return;
-          }
-          const snapshot=await db.ref('membershipApplications')
-            .orderByChild('sicil')
-            .equalTo(safeIdentifier)
-            .limitToFirst(1)
-            .once('value');
-          let authEmail='';
-          snapshot.forEach(child=>{
-            const record=recordFromSnapshot(child);
-            authEmail=record?.authEmail || record?.email || '';
-          });
-          if(!authEmail) authEmail=authEmailFor(safeIdentifier,'');
-          await signInAndLoadMember(action,normalizeEmail(authEmail),safePassword);
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    loadCurrentMember(){
-      const action='loadCurrentMember';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Firebase oturumu açık değil.');
-      loadMemberDocument(action,user.uid).catch(error=>notify(action,false,{},firebaseMessage(error)));
-    },
-
-    loadPendingMembers(){
-      const action='loadPendingMembers';
-      if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      db.ref('membershipApplications').once('value')
-        .then(snapshot=>{
-          const list=[];
-          snapshot.forEach(child=>{
-            const record=recordFromSnapshot(child);
-            if(record && isPending(record.applicationStatus)) list.push(record);
-          });
-          notify(action,true,list,`${list.length} başvuru listelendi.`);
-        })
-        .catch(error=>notify(action,false,[],firebaseMessage(error)));
-    },
-
-    loadMembers(){
-      const action='loadMembers';
-      if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      db.ref('members').once('value')
-        .then(snapshot=>{
-          const list=[];
-          snapshot.forEach(child=>{
-            const record=recordFromSnapshot(child,'approved');
-            if(record && !isBlocked(record.applicationStatus)) list.push(record);
-          });
-          notify(action,true,list,`${list.length} üye listelendi.`);
-        })
-        .catch(error=>notify(action,false,[],firebaseMessage(error)));
-    },
-
-    ensureSeededAdminSession(password){
-      const action='ensureSeededAdminSession';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      if(String(password || '')!==SEEDED_ADMIN.password){
-        notify(action,false,{},'Admin parolası doğrulanamadı.');
-        return;
-      }
-      (async()=>{
-        try{
-          let result;
-          try{
-            result=await auth.signInWithEmailAndPassword(SEEDED_ADMIN.email,SEEDED_ADMIN.password);
-          }catch(error){
-            if(error && error.code==='auth/user-not-found'){
-              result=await auth.createUserWithEmailAndPassword(SEEDED_ADMIN.email,SEEDED_ADMIN.password);
-            }else{
-              throw error;
-            }
-          }
-          await writeSeededAdmin(action,result.user || {});
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    updateMemberStatus(uid,nextStatus,reviewNote){
-      const action='updateMemberStatus';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      (async()=>{
-        const safeUid=clean(uid);
-        const normalized=clean(nextStatus).toLowerCase();
-        if(!safeUid || !normalized){
-          notify(action,false,{},'Üye kimliği ve durum zorunlu.');
-          return;
-        }
-        try{
-          const makeAdmin=['make_admin','admin','manager','yonetici'].includes(normalized);
-          const removeAdmin=['remove_admin','standard_member','standart','uyeye_cevir','yoneticilikten_cikart'].includes(normalized);
-          const storedStatus=(makeAdmin || removeAdmin) ? 'approved' : normalized;
-          const removeFromMembers=isBlocked(normalized);
-          const appSnap=await db.ref(`membershipApplications/${safeUid}`).once('value');
-          const applicationData=recordFromSnapshot(appSnap) || {uid:safeUid,firebaseUid:safeUid};
-          const actingUser=auth.currentUser;
-          if(removeFromMembers && (safeUid===actingUser?.uid || safeUid===SEEDED_ADMIN.uid || isProtectedAdminRecord(applicationData))){
-            throw new Error('Aktif yönetici hesabı veya yönetici kaydı üyelikten çıkarılamaz. Önce farklı bir standart üyeyi seçin.');
-          }
-          const wasApproved=clean(applicationData.applicationStatus).toLowerCase()==='approved';
-          const updated={
-            ...applicationData,
-            uid:safeUid,
-            firebaseUid:safeUid,
-            applicationStatus:storedStatus,
-            reviewNote:clean(reviewNote),
-            reviewedAt:now(),
-            updatedAt:now()
-          };
-          if(makeAdmin){
-            updated.memberRole='admin';
-            updated.type='admin';
-            updated.isAdmin=true;
-            updated.role='Yönetici';
-          }else if(removeAdmin){
-            updated.memberRole='member';
-            updated.type='standart';
-            updated.isAdmin=false;
-            updated.role='';
-          }else if(removeFromMembers){
-            updated.memberRole='member';
-            updated.isAdmin=false;
-          }else if(storedStatus==='approved'){
-            updated.memberRole='member';
-          }
-          const updates={};
-          updates[`membershipApplications/${safeUid}`]=updated;
-          if(removeFromMembers){
-            updates[`members/${safeUid}`]=null;
-            updates[`admins/${safeUid}`]=null;
-            updates[`exchangeRequests/${safeUid}`]=null;
-          }else if(makeAdmin || removeAdmin || storedStatus==='approved'){
-            updates[`members/${safeUid}`]=updated;
-            updates[`admins/${safeUid}`]=makeAdmin ? true : null;
-          }
-          if(storedStatus==='approved' && !removeFromMembers && !wasApproved){
-            const approvalMail=approvalEmailPayload(updated,safeUid);
-            if(approvalMail){
-              const mailRef=db.ref('approvalEmails').push();
-              const mailKey=mailRef.key;
-              updates[`approvalEmails/${mailKey}`]=approvalMail;
-              updates[`membershipApplications/${safeUid}/approvalEmailQueuedAt`]=approvalMail.createdAt;
-              updates[`membershipApplications/${safeUid}/approvalEmailQueueId`]=mailKey;
-              updates[`members/${safeUid}/approvalEmailQueuedAt`]=approvalMail.createdAt;
-              updates[`members/${safeUid}/approvalEmailQueueId`]=mailKey;
-            }
-          }
-          await db.ref().update(updates);
-          notify(action,true,{uid:safeUid,firebaseUid:safeUid,applicationStatus:storedStatus,removedFromMembers:removeFromMembers,memberRole:updated.memberRole,isAdmin:!!updated.isAdmin,type:updated.type || 'standart'},removeFromMembers ? 'Üye aktif listeden çıkarıldı ve erişimi kapatıldı.' : makeAdmin ? 'Üye yönetici yapıldı.' : removeAdmin ? 'Yönetici yetkisi kaldırıldı, üye standart üye olarak devam ediyor.' : 'Üyelik durumu güncellendi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    submitExchangeRequest(payloadJson){
-      const action='submitExchangeRequest';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Becayiş talebi için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const payload=JSON.parse(payloadJson || '{}');
-          const currentCityKey=exchangeCityKey(payload.currentCity);
-          const targetCityKey=exchangeCityKey(payload.targetCity);
-          if(!currentCityKey || !targetCityKey){
-            notify(action,false,{},'Mevcut il ve gitmek istenen il zorunlu.');
-            return;
-          }
-          const data=exchangeMapFromPayload(payload,user);
-          await db.ref(`exchangeRequests/${user.uid}`).update(data);
-          notify(action,true,data,'Becayiş talebi il bazlı eşleşme havuzuna kaydedildi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    deleteExchangeRequest(){
-      const action='deleteExchangeRequest';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Becayiş talebini silmek için önce üye girişi yapılmalı.');
-      db.ref(`exchangeRequests/${user.uid}`).remove()
-        .then(()=>notify(action,true,{uid:user.uid},'Becayiş talebin Firebase havuzundan silindi.'))
-        .catch(error=>notify(action,false,{},firebaseMessage(error)));
-    },
-
-    loadExchangeMatches(payloadJson){
-      const action='loadExchangeMatches';
-      if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,[],'Becayiş eşleşmesi için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const payload=JSON.parse(payloadJson || '{}');
-          const currentCityKey=exchangeCityKey(payload.currentCity);
-          const targetCityKey=exchangeCityKey(payload.targetCity);
-          if(!currentCityKey || !targetCityKey){
-            notify(action,false,[],'Mevcut il ve hedef il olmadan eşleşme aranamaz.');
-            return;
-          }
-          const snapshot=await db.ref('exchangeRequests')
-            .orderByChild('currentCityKey')
-            .equalTo(targetCityKey)
-            .limitToFirst(50)
-            .once('value');
-          const list=[];
-          snapshot.forEach(child=>{
-            if(child.key===user.uid) return;
-            const item=child.val() || {};
-            if(item.targetCityKey===currentCityKey) list.push({...item,uid:child.key});
-          });
-          notify(action,true,list,`${list.length} becayiş eşleşmesi bulundu.`);
-        }catch(error){
-          notify(action,false,[],firebaseMessage(error));
-        }
-      })();
-    },
-
-    loadForumTopics(){
-      const action='loadForumTopics';
-      if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,[],'Forum için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          await approvedForumMember(user);
-          const snapshot=await db.ref('forumTopics')
-            .limitToLast(80)
-            .once('value');
-          const list=[];
-          snapshot.forEach(child=>{
-            const item=forumTopicFromSnapshot(child);
-            if(item && item.status!=='deleted') list.push(item);
-          });
-          list.sort((a,b)=>(Number(b.lastActivityAt)||0)-(Number(a.lastActivityAt)||0));
-          notify(action,true,list,`${list.length} forum konusu listelendi.`);
-        }catch(error){
-          notify(action,false,[],firebaseMessage(error));
-        }
-      })();
-    },
-
-    createForumTopic(payloadJson){
-      const action='createForumTopic';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Forum için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const member=await approvedForumMember(user);
-          const payload=JSON.parse(payloadJson || '{}');
-          const topicRef=db.ref('forumTopics').push();
-          const data=forumTopicMapFromPayload(payload,user,member,topicRef.key);
-          const updates={
-            [`forumTopics/${topicRef.key}`]:data,
-            [`forumUserIndex/${user.uid}/topics/${topicRef.key}`]:true
-          };
-          await db.ref().update(updates);
-          notify(action,true,data,'Forum konusu yayınlandı.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    loadForumReplies(topicId){
-      const action='loadForumReplies';
-      if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,[],'Forum için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          await approvedForumMember(user);
-          const safeTopicId=clean(topicId);
-          if(!safeTopicId) return notify(action,false,[],'Konu kimliği eksik.');
-          const snapshot=await db.ref(`forumReplies/${safeTopicId}`)
-            .limitToLast(120)
-            .once('value');
-          const list=[];
-          snapshot.forEach(child=>{
-            const item=forumReplyFromSnapshot(child,safeTopicId);
-            if(item && item.status!=='deleted') list.push(item);
-          });
-          notify(action,true,list,`${list.length} forum cevabı listelendi.`);
-        }catch(error){
-          notify(action,false,[],firebaseMessage(error));
-        }
-      })();
-    },
-
-    createForumReply(payloadJson){
-      const action='createForumReply';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Forum için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const member=await approvedForumMember(user);
-          const payload=JSON.parse(payloadJson || '{}');
-          const safeTopicId=clean(payload.topicId);
-          if(!safeTopicId) return notify(action,false,{},'Konu kimliği eksik.');
-          const topicSnap=await db.ref(`forumTopics/${safeTopicId}`).once('value');
-          const topic=forumTopicFromSnapshot(topicSnap);
-          if(!topic || topic.status==='deleted') return notify(action,false,{},'Konu bulunamadı veya kaldırılmış.');
-          const replyRef=db.ref(`forumReplies/${safeTopicId}`).push();
-          const data=forumReplyMapFromPayload({...payload,topicId:safeTopicId},user,member,replyRef.key);
-          const activityAt=now();
-          const updates={
-            [`forumReplies/${safeTopicId}/${replyRef.key}`]:data,
-            [`forumTopics/${safeTopicId}/replyCount`]:(Number(topic.replyCount)||0)+1,
-            [`forumTopics/${safeTopicId}/lastActivityAt`]:activityAt,
-            [`forumTopics/${safeTopicId}/updatedAt`]:activityAt,
-            [`forumTopics/${safeTopicId}/lastReplyByUid`]:user.uid,
-            [`forumTopics/${safeTopicId}/lastReplyByName`]:data.authorName,
-            [`forumUserIndex/${user.uid}/replies/${safeTopicId}/${replyRef.key}`]:true
-          };
-          await db.ref().update(updates);
-          notify(action,true,data,'Forum cevabı yayınlandı.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    deleteForumTopic(topicId){
-      const action='deleteForumTopic';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Forum için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const safeTopicId=clean(topicId);
-          const topicSnap=await db.ref(`forumTopics/${safeTopicId}`).once('value');
-          const topic=forumTopicFromSnapshot(topicSnap);
-          if(!topic) return notify(action,false,{},'Konu bulunamadı.');
-          if(!(await canModifyForumItem(user,topic))) return notify(action,false,{},'Bu konuyu kaldırma yetkin yok.');
-          const updates={
-            [`forumTopics/${safeTopicId}/status`]:'deleted',
-            [`forumTopics/${safeTopicId}/deletedAt`]:now(),
-            [`forumTopics/${safeTopicId}/deletedByUid`]:user.uid
-          };
-          await db.ref().update(updates);
-          notify(action,true,{topicId:safeTopicId},'Forum konusu kaldırıldı.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    deleteForumReply(topicId,replyId){
-      const action='deleteForumReply';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Forum için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const safeTopicId=clean(topicId);
-          const safeReplyId=clean(replyId);
-          const replySnap=await db.ref(`forumReplies/${safeTopicId}/${safeReplyId}`).once('value');
-          const reply=forumReplyFromSnapshot(replySnap,safeTopicId);
-          if(!reply) return notify(action,false,{},'Cevap bulunamadı.');
-          if(!(await canModifyForumItem(user,reply))) return notify(action,false,{},'Bu cevabı kaldırma yetkin yok.');
-          const updates={
-            [`forumReplies/${safeTopicId}/${safeReplyId}/status`]:'deleted',
-            [`forumReplies/${safeTopicId}/${safeReplyId}/deletedAt`]:now(),
-            [`forumReplies/${safeTopicId}/${safeReplyId}/deletedByUid`]:user.uid
-          };
-          await db.ref().update(updates);
-          notify(action,true,{topicId:safeTopicId,replyId:safeReplyId},'Forum cevabı kaldırıldı.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    reportForumContent(payloadJson){
-      const action='reportForumContent';
-      if(!init()) return notify(action,false,{},'Firebase web baglantisi hazir degil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Forum sikayeti icin once uye girisi yapilmali.');
-      (async()=>{
-        try{
-          await approvedForumMember(user);
-          const payload=JSON.parse(payloadJson || '{}');
-          const targetType=clean(payload.targetType)==='reply' ? 'reply' : 'topic';
-          const topicId=clean(payload.topicId);
-          const replyId=clean(payload.replyId);
-          if(!topicId) return notify(action,false,{},'Sikayet icin konu kimligi eksik.');
-          if(targetType==='reply' && !replyId) return notify(action,false,{},'Sikayet icin cevap kimligi eksik.');
-          const ref=db.ref('forumReports').push();
-          const data={
-            id:ref.key,
-            reportId:ref.key,
-            reporterUid:user.uid,
-            reporterEmail:user.email || '',
-            targetType,
-            topicId,
-            replyId:targetType==='reply' ? replyId : '',
-            targetAuthorUid:clean(payload.targetAuthorUid),
-            targetAuthorName:forumClean(payload.targetAuthorName || '',80),
-            title:forumClean(payload.title || '',160),
-            reason:forumClean(payload.reason || 'Uygunsuz icerik',400),
-            status:'open',
-            createdAt:now()
-          };
-          await ref.set(data);
-          notify(action,true,data,'Sikayet moderasyon kuyruguna gonderildi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    loadAnnouncements(){
-      const action='loadAnnouncements';
-      if(!init()) return notify(action,false,[],'Firebase web bağlantısı hazır değil.');
-      db.ref('announcements')
-        .limitToLast(30)
-        .once('value')
-        .then(snapshot=>{
-          const list=[];
-          snapshot.forEach(child=>{
-            const item=announcementFromSnapshot(child);
-            if(item) list.push(item);
-          });
-          list.sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
-          notify(action,true,list,`${list.length} duyuru listelendi.`);
-        })
-        .catch(error=>notify(action,false,[],firebaseMessage(error)));
-    },
-
-    createAnnouncement(payloadJson){
-      const action='createAnnouncement';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Duyuru yayınlamak için yönetici girişi gerekli.');
-      (async()=>{
-        try{
-          if(!(await currentUserIsAdmin(user))) return notify(action,false,{},'Duyuru yayınlama yetkisi sadece yöneticilerde.');
-          const payload=JSON.parse(payloadJson || '{}');
-          const ref=db.ref('announcements').push();
-          const data=announcementMapFromPayload(payload,user,ref.key);
-          const tokenSnap=await db.ref('notificationTokens').once('value');
-          const tokenCount=enabledNotificationTokenCount(tokenSnap);
-          data.installTokenCount=tokenCount;
-          data.broadcastStatus=tokenCount>0 ? 'queued' : 'no_tokens';
-          const sentAt=now();
-          await ref.set(data);
-          await db.ref(`notifications/${ref.key}`).set({...data,channel:data.channel || 'app',sentAt});
-          await db.ref(`notificationBroadcasts/${ref.key}`).set({
-            announcementId:ref.key,
-            title:data.title,
-            body:data.body,
-            href:data.href || '',
-            label:data.label || 'Duyuru',
-            imageUrl:data.imageUrl || '',
-            imageDataUrl:data.imageDataUrl || '',
-            whatsappText:data.whatsappText || '',
-            audience:data.audience || 'installed_members',
-            channel:data.channel || 'app',
-            target:data.target || 'app_platform',
-            tokenCount,
-            status:tokenCount>0 ? 'pending' : 'no_tokens',
-            createdAt:sentAt,
-            authorUid:user.uid
-          });
-          notify(action,true,data,'Duyuru yayınlandı ve bildirim geçmişine eklendi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    updateAnnouncement(payloadJson){
-      const action='updateAnnouncement';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Duyuru güncellemek için yönetici girişi gerekli.');
-      (async()=>{
-        try{
-          if(!(await currentUserIsAdmin(user))) return notify(action,false,{},'Duyuru güncelleme yetkisi sadece yöneticilerde.');
-          const payload=JSON.parse(payloadJson || '{}');
-          const announcementId=clean(payload.announcementId || payload.id);
-          if(!announcementId) return notify(action,false,{},'Güncellenecek duyuru kimliği bulunamadı.');
-          const snap=await db.ref(`announcements/${announcementId}`).once('value');
-          const existing=snap.val() || {};
-          const data=announcementUpdateMapFromPayload(payload,user,announcementId,existing);
-          data.installTokenCount=Number(existing.installTokenCount || 0);
-          data.broadcastStatus=clean(existing.broadcastStatus) || 'updated';
-          const updates={
-            [`announcements/${announcementId}`]:data,
-            [`notifications/${announcementId}`]:{...data,channel:data.channel || 'app',updatedAt:now()},
-            [`notificationBroadcasts/${announcementId}/title`]:data.title,
-            [`notificationBroadcasts/${announcementId}/body`]:data.body,
-            [`notificationBroadcasts/${announcementId}/target`]:data.target || 'app_platform',
-            [`notificationBroadcasts/${announcementId}/audience`]:data.audience || 'installed_members',
-            [`notificationBroadcasts/${announcementId}/channel`]:data.channel || 'app',
-            [`notificationBroadcasts/${announcementId}/status`]:'updated',
-            [`notificationBroadcasts/${announcementId}/updatedAt`]:now(),
-            [`notificationBroadcasts/${announcementId}/updatedByUid`]:user.uid
-          };
-          await db.ref().update(updates);
-          notify(action,true,data,'Duyuru güncellendi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    deleteAnnouncement(announcementId){
-      const action='deleteAnnouncement';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Duyuru silmek için yönetici girişi gerekli.');
-      (async()=>{
-        try{
-          if(!(await currentUserIsAdmin(user))) return notify(action,false,{},'Duyuru silme yetkisi sadece yöneticilerde.');
-          const safeId=clean(announcementId);
-          if(!safeId) return notify(action,false,{},'Silinecek duyuru kimliği bulunamadı.');
-          const deletedAt=now();
-          await db.ref().update({
-            [`announcements/${safeId}/status`]:'deleted',
-            [`announcements/${safeId}/deletedAt`]:deletedAt,
-            [`announcements/${safeId}/deletedByUid`]:user.uid,
-            [`notifications/${safeId}/status`]:'deleted',
-            [`notifications/${safeId}/deletedAt`]:deletedAt,
-            [`notifications/${safeId}/deletedByUid`]:user.uid,
-            [`notificationBroadcasts/${safeId}/status`]:'deleted',
-            [`notificationBroadcasts/${safeId}/deletedAt`]:deletedAt,
-            [`notificationBroadcasts/${safeId}/deletedByUid`]:user.uid
-          });
-          notify(action,true,{announcementId:safeId,status:'deleted'},'Duyuru silindi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    updateMemberProfile(payloadJson){
-      const action='updateMemberProfile';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Personel kartı eşitlemesi için önce üye girişi yapılmalı.');
-      (async()=>{
-        try{
-          const payload=JSON.parse(payloadJson || '{}');
-          const data={profileUpdatedAt:now()};
-          putProfileFields(data,payload);
-          ['fullName','sicil','company','unit','city','role','email','phone'].forEach(key=>{
-            if(clean(payload[key])) data[key]=clean(payload[key]);
-          });
-          const updates={};
-          Object.entries(data).forEach(([key,value])=>{
-            updates[`members/${user.uid}/${key}`]=value;
-            updates[`membershipApplications/${user.uid}/${key}`]=value;
-          });
-          await db.ref().update(updates);
-          notify(action,true,{...data,uid:user.uid,firebaseUid:user.uid},'Personel kartı Firebase hesabına eşitlendi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    updateUserSyncData(payloadJson){
-      const action='updateUserSyncData';
-      if(!init()) return notify(action,false,{},'Firebase web baglantisi hazir degil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Veri senkronu icin once uye girisi yapilmali.');
-      (async()=>{
-        try{
-          const payload=JSON.parse(payloadJson || '{}');
-          const data={
-            ...payload,
-            uid:user.uid,
-            updatedAt:Number(payload.updatedAt || now()),
-            source:'web'
-          };
-          await db.ref(`userSync/${user.uid}`).set(data);
-          notify(action,true,{uid:user.uid,updatedAt:data.updatedAt},'Kullanici verileri senkronize edildi.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    },
-
-    loadUserSyncData(){
-      const action='loadUserSyncData';
-      if(!init()) return notify(action,false,{},'Firebase web baglantisi hazir degil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Veri senkronu icin once uye girisi yapilmali.');
-      db.ref(`userSync/${user.uid}`).once('value')
-        .then(snapshot=>{
-          const data=snapshot.val() || {};
-          notify(action,true,{...data,uid:user.uid},'Kullanici verileri yuklendi.');
-        })
-        .catch(error=>notify(action,false,{},firebaseMessage(error)));
-    },
-
-    signOut(){
-      const action='signOut';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      auth.signOut()
-        .then(()=>notify(action,true,{},'Firebase oturumu kapatıldı.'))
-        .catch(error=>notify(action,false,{},firebaseMessage(error)));
-    },
-
-    deleteMyData(){
-      const action='deleteMyData';
-      if(!init()) return notify(action,false,{},'Firebase web bağlantısı hazır değil.');
-      const user=auth.currentUser;
-      if(!user) return notify(action,false,{},'Veri silme için önce üye girişi yapılmalı.');
-      if(user.uid===SEEDED_ADMIN.uid || normalizeEmail(user.email)===SEEDED_ADMIN.email){
-        notify(action,false,{},'Ana admin hesabı uygulama içinden silinemez.');
-        return;
-      }
-      (async()=>{
-        try{
-          const updates={
-            [`members/${user.uid}`]:null,
-            [`membershipApplications/${user.uid}`]:null,
-            [`exchangeRequests/${user.uid}`]:null,
-            [`admins/${user.uid}`]:null,
-            ...(await forumDeletionUpdatesForUser(user.uid))
-          };
-          await db.ref().update(updates);
-          await auth.signOut();
-          notify(action,true,{uid:user.uid},'Uygulama üyelik, becayiş ve forum verilerin silindi. Firebase oturumu kapatıldı.');
-        }catch(error){
-          notify(action,false,{},firebaseMessage(error));
-        }
-      })();
-    }
-  };
-
-  function firebaseMessage(error){
-    const code=error?.code || '';
-    const message=error?.message || String(error || 'Firebase işlemi tamamlanamadı.');
-    if(code==='auth/wrong-password' || code==='auth/invalid-credential'){
-      return 'E-posta/sicil veya parola eşleşmedi. Bilgileri kontrol edip tekrar deneyin.';
-    }
-    if(code==='auth/user-not-found'){
-      return 'Bu sicil/e-posta için Firebase üyeliği bulunamadı.';
-    }
-    if(code==='auth/email-already-in-use'){
-      return 'Bu e-posta Firebase Authentication üzerinde kayıtlı. Aynı parola ile giriş yapmayı deneyin.';
-    }
-    if(code==='auth/operation-not-allowed'){
-      return 'Firebase Authentication Email/Password seçeneği aktif değil.';
-    }
-    if(code==='permission-denied'){
-      return 'Firebase Realtime Database kuralları bu işleme izin vermedi.';
-    }
-    return message;
-  }
-
-  init();
-})();
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="format-detection" content="telephone=no" />
+<title>TCDD İşçi Platformu</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="ios-visual.css" />
+</head>
+<body class="app-booting">
+<div class="splash-screen" id="splashScreen" aria-hidden="false">
+  <div class="splash-logo-shell">
+    <div class="splash-orbit splash-orbit-a"></div>
+    <div class="splash-orbit splash-orbit-b"></div>
+    <div class="splash-logo-card">
+      <img class="splash-logo" src="images/platform_logo.png" alt="TCDD İşçi Platformu" />
+      <div class="splash-title">TCDD İŞÇİ PLATFORMU</div>
+      <div class="splash-subtitle">Bağımsız yardımcı platform</div>
+      <div class="splash-rails" aria-hidden="true"><span></span><span></span><span></span></div>
+    </div>
+  </div>
+</div>
+<header>
+  <div class="wrap topbar">
+    <div class="topbar-left">
+      <button class="menu-toggle web-menu-toggle" id="webMenuToggle" type="button" aria-label="Menüyü aç">
+        <span></span><span></span><span></span>
+      </button>
+      <button class="brand brand-home" id="goHomeBrand" type="button" aria-label="Ana sayfaya dön">
+        <img src="images/platform_logo.png" alt="TCDD İşçi Platformu" />
+        <h1><span>TCDD İŞÇİ PLATFORMU</span><small>Emek kazanır. Bilgi güç verir.</small></h1>
+      </button>
+    </div>
+    <button class="topbar-session-logout hidden" id="topbarLogoutBtn" type="button" aria-hidden="true">Oturumu Kapat</button>
+    <div class="topbar-slogan" id="topbarSlogan">Emek kazanır. Bilgi güç verir.</div>
+  </div>
+</header>
+<div class="nav-drawer-shell" id="navDrawerShell" aria-hidden="true">
+  <button class="nav-drawer-backdrop" id="navDrawerBackdrop" aria-label="Menüyü kapat"></button>
+  <aside class="nav-drawer" id="navDrawer" aria-label="Ana menü">
+    <div class="nav-drawer-head">
+      <div>
+        <div class="drawer-kicker">Ana Menü</div>
+        <h3>Gezinme</h3>
+      </div>
+      <button class="btn small" id="closeNavDrawerBtn">Kapat</button>
+    </div>
+    <div class="nav-drawer-menu">
+      <button class="nav-btn active" data-page="home">Ana Sayfa</button>
+      <button class="nav-btn" data-page="salary">Maaş / İkramiye</button>
+      <button class="nav-btn" data-page="work">Çalışma Takvimi</button>
+      <button class="nav-btn" data-page="leave">İzin</button>
+      <button class="nav-btn" data-page="membership">Üyelik</button>
+      <button class="nav-btn" data-page="exchange">Becayiş</button>
+      <button class="nav-btn" data-page="mevzuat">Mevzuat</button>
+      <button class="nav-btn" data-page="form">Forum</button>
+      <button class="nav-btn nav-btn-social" data-page="social"><span class="nav-social-icons" aria-hidden="true"><span>f</span><span>▶</span><span>ig</span></span><span>Sosyal Medya</span></button>
+      <button class="nav-btn" data-page="facilities">Misafirhaneler</button>
+    </div>
+    <div class="nav-drawer-session hidden" id="navDrawerSession">
+      <button class="nav-logout-btn hidden" id="navDrawerLogoutBtn" type="button">Oturumu Kapat</button>
+    </div>
+    <div class="nav-drawer-legal">
+      <a href="https://www.demiryolcu.com.tr/gizlilik-politikasi" target="_blank" rel="noopener">Gizlilik Politikası</a>
+      <a href="https://www.demiryolcu.com.tr/hesap-silme" target="_blank" rel="noopener">Hesap ve Veri Silme</a>
+    </div>
+  </aside>
+</div>
+<main class="wrap">
+  <section id="home" class="section active">
+    <div class="panel hero home-panel">
+      <div class="home-glow home-glow-a"></div>
+      <div class="home-glow home-glow-b"></div>
+        <div class="home-stage">
+          <div class="home-copy">
+            <div class="home-kicker-row">
+            <div class="home-kicker">Demiryolu İşçi Ağı</div>
+            <button class="info-trigger" type="button" data-info-toggle="homeInfo" aria-label="Ana sayfa bilgisi">!</button>
+          </div>
+          <h2>TCDD İşçi Platformu</h2>
+          <div class="info-panel hidden" id="homeInfo">Maaş, mevzuat, izin, çalışma takvimi ve becayiş işlemleri için hazırlanmış bağımsız yardımcı platform.</div>
+        </div>
+          <div class="home-showcase">
+            <div class="showcase-logo-stage">
+              <img class="showcase-logo" src="images/platform_logo.png" alt="TCDD İşçi Platformu logosu">
+            </div>
+          <div class="showcase-rails" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            </div>
+          </div>
+        </div>
+        <div class="home-announcement hidden" id="homeAnnouncement" aria-live="polite">
+          <div class="home-announcement-copy">
+            <div class="home-announcement-kicker">Yeni Duyuru</div>
+            <strong>demiryolcu.com.tr yayında</strong>
+            <span>Gizlilik politikası, hesap/veri silme yolları ve platform bilgilendirmeleri web sitesinde açık şekilde yayınlanıyor.</span>
+          </div>
+          <button class="btn small primary" id="dismissHomeAnnouncementBtn" type="button">Kapat</button>
+        </div>
+        <div class="membership-gate-home" id="membershipGateHome" aria-live="polite">
+          <div class="membership-gate-icon" aria-hidden="true">✓</div>
+          <div class="membership-gate-copy">
+            <strong>İçeriklere giriş için üyelik gerekir.</strong>
+            <span>Üyelik, hesap yönetimi, personel kartı, takvim ve becayiş özellikleri yönetim onaylı üye girişiyle kullanılır.</span>
+          </div>
+          <button class="btn small primary goto" data-page="membership" type="button">Üye Girişi</button>
+        </div>
+        <div class="home-legal-note">
+          <strong>Resmi kurum uygulaması değildir.</strong>
+          <span>Hesaplama, mevzuat ve bilgilendirme ekranları öğrenme ve kolay erişim amacıyla sunulur; resmi bordro, resmi yazı veya kurum işlemi yerine geçmez.</span>
+        </div>
+        <div class="home-bulletin-panel" id="homeBulletinPanel">
+          <div class="home-bulletin-head">
+            <div>
+              <div class="home-bulletin-kicker">Platform Bildirileri</div>
+              <strong>Güncel Duyurular</strong>
+            </div>
+            <button class="info-trigger" type="button" data-info-toggle="homeBulletinInfo" aria-label="Bildiri bilgisi">!</button>
+          </div>
+          <div class="info-panel hidden" id="homeBulletinInfo">Bu alan sabit platform duyurularını gösterir. İstersek sonraki turda RSS veya canlı haber akışı da buraya bağlanabilir.</div>
+          <div class="home-bulletin-stage">
+            <div class="home-bulletin-feature" id="homeBulletinFeature"></div>
+            <div class="home-bulletin-list" id="homeBulletinList"></div>
+          </div>
+          <div class="home-bulletin-foot" id="homeBulletinFoot" aria-hidden="true"></div>
+        </div>
+        <div class="home-management-panel hidden" id="homeManagementPanel" aria-label="Yönetim paneli">
+          <div class="home-management-head">
+            <img src="images/badge_management.png" alt="">
+            <div>
+              <div class="home-kicker">Yönetim</div>
+              <h3>Yönetim Paneli</h3>
+              <p>Üyelik onayı, aktif üye listesi, duyuru ve bildirim işlemleri tek alanda.</p>
+            </div>
+          </div>
+          <div class="home-management-actions">
+            <button class="home-management-card goto" data-page="membership" type="button">
+              <span>Üyelik Paneli</span>
+              <strong>Başvurular ve üyeler</strong>
+            </button>
+            <button class="home-management-card goto" data-page="notifications" type="button">
+              <span>Bildirim Paneli</span>
+              <strong>Uygulama, WhatsApp ve Platform Bildirileri</strong>
+            </button>
+          </div>
+        </div>
+        <div class="home-grid home-grid-rich">
+          <button class="home-card rich-card goto" data-page="mevzuat">
+          <div class="home-card-top">
+            <img class="home-card-figure figure-float-a" src="images/badge_mevzuat.png" alt="Mevzuat rozeti">
+            <span class="home-card-badge">Belge</span>
+          </div>
+          <h3>Mevzuat</h3>
+          <div class="home-card-line">Sözleşme • Yönerge • Ekler</div>
+        </button>
+          <button class="home-card rich-card goto" data-page="salary">
+            <div class="home-card-top">
+              <img class="home-card-figure figure-float-b" src="images/badge_maas.png" alt="Maaş rozeti">
+            <span class="home-card-badge">Hesap</span>
+          </div>
+            <h3>Maaş</h3>
+            <div class="home-card-line">Gelirler • Kesintiler • Bordro</div>
+          </button>
+          <button class="home-card rich-card goto" data-page="work">
+            <div class="home-card-top">
+              <img class="home-card-figure work-figure figure-float-f" src="images/badge_work.png" alt="Çalışma takvimi rozeti">
+              <span class="home-card-badge">Plan</span>
+            </div>
+            <h3>Çalışma Takvimi</h3>
+            <div class="home-card-line">Vardiya • Saat • Yemek Paydosu</div>
+          </button>
+          <button class="home-card rich-card goto" data-page="leave">
+            <div class="home-card-top">
+              <img class="home-card-figure leave-figure figure-float-c" src="images/badge_leave.png" alt="Yıllık izin rozeti">
+            <span class="home-card-badge">Takvim</span>
+          </div>
+          <h3>İzin</h3>
+          <div class="home-card-line">Yıllık • Sendika TİS • Kalan</div>
+        </button>
+        <button class="home-card rich-card goto" data-page="exchange">
+          <div class="home-card-top">
+            <img class="home-card-figure exchange-figure figure-float-b" src="images/badge_exchange.png" alt="Becayiş rozeti">
+            <span class="home-card-badge">Tayin</span>
+          </div>
+          <h3>Becayiş</h3>
+          <div class="home-card-line">Bölge • İl • İlçe • Eşleşme</div>
+        </button>
+        <button class="home-card rich-card goto" data-page="form">
+          <div class="home-card-top">
+            <img class="home-card-figure figure-float-d" src="images/badge_forum.png" alt="Forum rozeti">
+            <span class="home-card-badge">Topluluk</span>
+          </div>
+          <h3>Forum</h3>
+          <div class="home-card-line">Gündem • Sorular • Başlıklar</div>
+        </button>
+        <button class="home-card rich-card goto" data-page="facilities">
+          <div class="home-card-top">
+            <img class="home-card-figure facility-figure figure-float-c" src="images/badge_facilities.png" alt="Misafirhaneler rozeti">
+            <span class="home-card-badge">Konaklama</span>
+          </div>
+          <h3>Misafirhaneler</h3>
+          <div class="home-card-line">Tesisler • Misafirhaneler • Harita • İletişim</div>
+          <div class="facility-highlight-meta">
+            <span id="homeFacilityCount">0 tesis</span>
+            <span id="homeFacilityActive">0 aktif</span>
+          </div>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section id="mevzuat" class="section">
+    <div class="panel hero">
+      <div class="section-head hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">Mevzuat Kütüphanesi</div>
+          <h2>Mevzuat</h2>
+        </div>
+      </div>
+      <div class="law-library">
+        <div class="law-group">
+          <div class="law-group-head">
+            <span>TİS</span>
+            <h3>Toplu İş Sözleşmeleri</h3>
+          </div>
+          <div class="simple-grid law-grid">
+            <div class="simple-card">
+              <h3>31. Dönem Demiryolu İş Sözleşmesi</h3>
+              <div><a class="pdf-link" href="docs/31donemdemiryoluissozlesmesi.pdf">PDF Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>31. Dönem Liman Sözleşmesi</h3>
+              <div><a class="pdf-link" href="docs/31donemlimansozlesmesi.pdf">PDF Aç</a></div>
+            </div>
+          </div>
+        </div>
+        <div class="law-group">
+          <div class="law-group-head">
+            <span>EMİR</span>
+            <h3>Emirler</h3>
+          </div>
+          <div class="simple-grid law-grid">
+            <div class="simple-card">
+              <h3>201 Numaralı Genel Emir</h3>
+              <p>23.09.2019 tarihli ekli doküman.</p>
+              <div><a class="pdf-link" href="docs/emirler/201-numarali-genel-emir-23-09-2019.docx">Belge Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>205 Numaralı Genel Emir</h3>
+              <p>05.08.2025 tarihli ekli doküman.</p>
+              <div><a class="pdf-link" href="docs/emirler/205-numarali-genel-emir-05-08-2025.docx">Belge Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>301 Numaralı Genel Emir</h3>
+              <p>Ekli PDF dokümanı Emirler klasöründe yer alır.</p>
+              <div><a class="pdf-link" href="docs/emirler/301-numarali-genel-emir.pdf">PDF Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>641 Numaralı Genel Emir</h3>
+              <p>Ekli PDF dokümanı Emirler klasöründe yer alır.</p>
+              <div><a class="pdf-link" href="docs/emirler/641-numarali-genel-emir.pdf">PDF Aç</a></div>
+            </div>
+          </div>
+        </div>
+        <div class="law-group">
+          <div class="law-group-head">
+            <span>YÖNERGE</span>
+            <h3>Yönergeler</h3>
+          </div>
+          <div class="simple-grid law-grid">
+            <div class="simple-card">
+              <h3>Sağlık ve Psikoteknik Yönergesi</h3>
+              <div><a class="pdf-link" href="docs/saglik-ve-psikoteknik-yonergesi.pdf">PDF Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>Demiryolu Faaliyetlerinde Örnek Emniyet Kritik Görevler</h3>
+              <div><a class="pdf-link" href="docs/demiryolu-faaliyetlerinde-ornek-emniyet-kritik-gorevler.docx">Belge Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>İşçi Sendikaları</h3>
+              <div><a class="pdf-link" href="docs/isci-sendikalari-bilgi-notu.pdf">PDF Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>Sendika Delegasyon Sistemi</h3>
+              <div><a class="pdf-link" href="docs/sendika-delegasyon-sistemi.pdf">PDF Aç</a></div>
+            </div>
+            <div class="simple-card">
+              <h3>Sendika Seçimleri</h3>
+              <div><a class="pdf-link" href="docs/sendika-secimleri-bilgi-notu.pdf">PDF Aç</a></div>
+            </div>
+          </div>
+        </div>
+        <div class="law-group">
+          <div class="law-group-head">
+            <span>ÜCRET</span>
+            <h3>Saatlik Ücret Cetveli</h3>
+          </div>
+          <div class="simple-grid law-grid">
+            <div class="simple-card">
+              <h3>1 Mart 2026'dan Geçerli Saatlik Ücret Cetveli</h3>
+              <div><a class="pdf-link" href="docs/1-mart-2026-saatlik-ucret-cetveli.jpg" data-zoom-image data-preview-title="1 Mart 2026 saatlik ücret cetveli">Belge Aç</a></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="salary" class="section">
+    <div class="panel salary-shell">
+      <div class="mode-switch">
+        <button id="modeMaas" class="mode-btn active">Maaş Hesapla</button>
+        <button id="modeTedb" class="mode-btn">İkramiye TEDB</button>
+      </div>
+      <div class="salary-top-actions">
+        <button class="personnel-summary-card" id="openProfileDrawerBtn" type="button" aria-label="Personel kartını aç">
+          <span class="personnel-summary-info" aria-hidden="true">i</span>
+          <span class="personnel-summary-head">
+            <span class="personnel-summary-icon person-icon" aria-hidden="true"></span>
+            <span class="k">Aktif Personel</span>
+          </span>
+          <span class="personnel-summary-copy">
+            <span class="personnel-summary-label">Personel No</span>
+            <strong class="personnel-summary-sicil" id="activeProfileSicil">-</strong>
+            <strong class="v" id="activeProfileTitle">Henüz personel seçilmedi</strong>
+            <span class="s" id="activeProfileMeta"></span>
+          </span>
+          <span class="personnel-summary-avatar-wrap">
+            <span class="profile-avatar-card-orbit" aria-hidden="true"></span>
+            <span class="profile-avatar" id="activeProfileAvatar">TC</span>
+            <span class="profile-avatar-card-label">Personel Kartı</span>
+          </span>
+          <span class="personnel-summary-metrics">
+            <span>
+              <i class="metric-icon briefcase-icon" aria-hidden="true"></i>
+              <em>Meslek</em>
+              <strong id="activeProfileRole">-</strong>
+            </span>
+            <span>
+              <i class="metric-icon bars-icon" aria-hidden="true"></i>
+              <em>Derece</em>
+              <strong id="activeProfileDegree">-</strong>
+            </span>
+            <span>
+              <i class="metric-icon clock-icon" aria-hidden="true"></i>
+              <em>Çalışma</em>
+              <strong id="activeProfileSchedule">-</strong>
+            </span>
+          </span>
+        </button>
+      </div>
+      <div class="profile-drawer-shell" id="profileDrawerShell" aria-hidden="true">
+        <button class="drawer-backdrop" id="profileDrawerBackdrop" aria-label="Personel kartı çekmecesini kapat"></button>
+        <aside class="profile-drawer" id="profileDrawer" aria-label="Personel kartı çekmecesi">
+          <div class="drawer-head">
+            <div>
+              <div class="drawer-kicker">Yana Açılan Çekmece</div>
+              <h3>Personel Kartı</h3>
+            </div>
+            <button class="btn small" id="closeProfileDrawerBtn">Kapat</button>
+          </div>
+          <div class="drawer-tabs">
+            <button class="drawer-tab-btn active" id="profileDrawerTabCardBtn" data-profile-tab="card">Kart</button>
+            <button class="drawer-tab-btn" id="profileDrawerTabSavedBtn" data-profile-tab="saved">Kayıtlılar</button>
+          </div>
+          <div class="profile-drawer-scroll" id="profileDrawerScroll">
+          <div class="profile-drawer-pane active" id="profileDrawerCardPane">
+            <div class="toolbar-card">
+              <div class="action-row">
+                <div class="left"><button class="btn good small" id="newProfileBtn" type="button">Yeni Personel</button></div>
+                <div class="right"><button class="btn soft small" id="startSalaryBtn">Gelirlere Geç</button></div>
+              </div>
+              <div class="quick-select-panel">
+                <div class="saved-pane-head quick-select-head">
+                  <h4>Hızlı Seçim</h4>
+                  <button class="btn small soft" id="openSavedProfilesFromQuickBtn">Tüm Kayıtlar</button>
+                </div>
+                <div class="quick-profile-list" id="quickProfileList"></div>
+              </div>
+              <div class="profile-modern-hero">
+                <div class="profile-modern-icon" id="profileDrawerAvatar">TC</div>
+                <div class="profile-modern-copy">
+                  <span>Personel Kartı</span>
+                  <strong id="profileDrawerName">Henüz personel seçilmedi</strong>
+                  <p id="profileDrawerMeta">Kart bilgileri kaydedildiğinde maaş, izin ve çalışma takvimi burada aynı veriyle çalışır.</p>
+                </div>
+                <div class="profile-modern-pill" id="profileDrawerCompany">Hazır</div>
+              </div>
+              <div class="grid2 striped-grid profile-field-grid">
+                <div class="field"><label>Sicil</label><input id="sicil" type="text" placeholder="Örn: 87265"></div>
+                <div class="field"><label>Ad Soyad</label><input id="fullName" type="text" placeholder="Ad Soyad"></div>
+                <div class="field profile-select-field"><label data-icon="BG">Bölge</label><select id="bolge"><option value="">Bölge seç</option></select></div>
+                <div class="field"><label>Kurum</label><select id="company"><option value="TCDD">TCDD</option><option value="TCDD_TASIMACILIK">TCDD Taşımacılık</option><option value="TURASAS">TÜRASAŞ</option></select></div>
+                <div class="field"><label>Meslek Türü</label><select id="workerType"><option value="SANATKAR">Sanatkâr</option><option value="SANATSIZ">Sanatsız</option></select></div>
+                <div class="field"><label>Skala</label><select id="skala"><option value="1">1. Skala</option><option value="4">4. Skala</option></select></div>
+                <div class="field"><label>Çalışma Düzeni</label><select id="calismaModeli"><option value="NORMAL_9">Normal 9 Saat</option><option value="KAYNAKCI_7_5">Kaynakçı 7,5 / 45 Saat</option><option value="VARDIYALI_8">Vardiyalı 7,5 Saat</option><option value="TTI_MAKINIST">TTİ &amp; Makinist</option></select></div>
+                <div class="field"><label>Derece</label><select id="degree"></select></div>
+                <div class="field"><label>Kademe</label><select id="kademe"><option value="KOK">Kök</option><option value="I" selected>1. Kademe</option><option value="II">2. Kademe</option></select></div>
+                <div class="field"><label>Giriş Yılı</label><input id="girisYili" type="number" step="1" placeholder="Örn: 2013"></div>
+                <div class="field"><label>Giriş Ayı</label><select id="girisAy"><option value="01">Ocak</option><option value="02">Şubat</option><option value="03">Mart</option><option value="04">Nisan</option><option value="05">Mayıs</option><option value="06">Haziran</option><option value="07">Temmuz</option><option value="08">Ağustos</option><option value="09">Eylül</option><option value="10">Ekim</option><option value="11">Kasım</option><option value="12">Aralık</option></select></div>
+                <div class="field"><label>Deneme / Terfi Esas Süresi</label><select id="probationMonths"><option value="4" selected>4 Ay</option><option value="3">3 Ay</option><option value="0">Yok</option></select></div>
+                <div class="field"><label>Askerlik Durumu</label><select id="militaryAfterStart"><option value="yok" selected>Yok</option><option value="before">İşe Giriş Öncesi</option><option value="after">İşe Giriş Sonrası</option></select></div>
+                <div class="field"><label>Askerlik Ötelemesi</label><select id="militaryDelayMonths"><option value="0" selected>Yok</option><option value="1">1 Ay</option><option value="6">6 Ay</option><option value="12">12 Ay</option></select></div>
+                <div class="field"><label>Önceki Yıldan Devreden İzin</label><input id="carryAnnualLeave" type="number" step="0.5" value="0" placeholder="Örn: 10"></div>
+                <div class="field profile-select-field"><label data-icon="GV">Görev / Ünvan</label><select id="terfiBilgisi"><option value="">Görev / ünvan seç</option></select></div>
+                <div class="field check-field">
+                  <label class="check-toggle"><input id="profilePostabasi" type="checkbox"><span>Postabaşı aktif</span></label>
+                  <small>Aktifse maaşta normal çalışma saati x 4,84 TL gelirlere eklenir.</small>
+                </div>
+              </div>
+               <div class="profile-service-strip">
+                 <div class="profile-service-pill">
+                   <div class="k">Terfi Esası</div>
+                   <div class="v" id="profileEffectiveStart">-</div>
+                 </div>
+                 <div class="profile-service-pill">
+                   <div class="k">Kart Derece / Kademe</div>
+                   <div class="v" id="profileCurrentStep">-</div>
+                 </div>
+                 <div class="profile-service-pill">
+                   <div class="k">Sonraki Terfi</div>
+                   <div class="v" id="profileNextPromotion">-</div>
+                 </div>
+               </div>
+              <div class="profile-finance-strip">
+                <div class="profile-finance-pill">
+                  <div class="k">Emek Ücreti</div>
+                  <div class="v" id="profileEmekGross">₺0,00</div>
+                </div>
+                <div class="profile-finance-pill">
+                  <div class="k">Hizmet Zammı</div>
+                  <div class="v" id="profileHizmetGross">₺0,00</div>
+                </div>
+                <div class="profile-finance-pill">
+                  <div class="k">Hizmet Yılı</div>
+                  <div class="v" id="profileServiceYears">0</div>
+                </div>
+                <div class="profile-finance-pill">
+                  <div class="k">Toplam Saatlik</div>
+                  <div class="v" id="profileHourlyTotal">₺0,00</div>
+                </div>
+              </div>
+              <div class="profile-save-status" id="profileSaveStatus" aria-live="polite"></div>
+              <div class="action-row" style="margin-top:14px">
+                <div class="left"><button class="btn primary" id="saveProfileBtn">Personel Kartını Kaydet</button></div>
+                <div class="right"><button class="btn" id="gotoTedbBtn">İkramiye Hesapla</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="profile-drawer-pane" id="profileDrawerSavedPane">
+            <div class="saved-pane-head">
+              <h3>Kayıtlı Personeller</h3>
+              <button class="btn small" id="backToProfileCardBtn">Kartı Aç</button>
+            </div>
+            <div class="saved-list" id="savedProfiles"></div>
+          </div>
+          </div>
+        </aside>
+      </div>
+
+      <div id="salaryWizard">
+        <div class="stepper">
+          <div class="step active" data-step="1">1. Personel</div>
+          <div class="step" data-step="2">2. Gelirler</div>
+          <div class="step" data-step="3">3. Kesintiler</div>
+          <div class="step" data-step="4">4. Bordro</div>
+        </div>
+
+        <div id="step1" class="mobile-pane">
+          <div class="drawer-intro compact-pane">
+            <div class="section-head">
+              <h3>Personel</h3>
+              <button class="info-trigger" type="button" data-info-toggle="step1Info" aria-label="Personel bilgisi">!</button>
+            </div>
+            <div class="info-panel hidden" id="step1Info">Hesaplamaya baslamadan once personel kartini acip yeni kayit olusturabilir veya kayitli personel secebilirsin.</div>
+            <div class="action-row" style="margin-top:14px">
+              <div class="left"><button class="btn primary" id="openProfileDrawerStepBtn">Personel Kartını Aç</button></div>
+              <div class="right"><button class="btn" id="step1ContinueBtn">Gelirlere Geç</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="step2" class="mobile-pane hidden">
+          <div class="section-head">
+            <h3>Gelirler</h3>
+            <button class="info-trigger" type="button" data-info-toggle="incomeInfo" aria-label="Gelirler bilgisi">!</button>
+          </div>
+          <div class="info-panel hidden" id="incomeInfo">Hizmet zammi bu ekranda ayrica girilmez; otomatik eklenir.</div>
+          <div class="single-grid striped-single-grid">
+            <div class="field"><label>Maaş Dönemi</label><select id="month"></select></div>
+            <div class="field"><label>ÇALIŞMA TİPİ</label><select id="workMode"><option value="VARDIYALI">Vardiya</option><option value="NORMAL" selected>Normal</option><option value="TTI_MAKINIST">TTİ &amp; Makinist</option></select></div>
+          </div>
+          <div class="info-box" style="margin:12px 0 14px 0">
+            <div class="data-strip">
+              <div class="data-pill"><div class="k">Normal</div><div class="v" id="miniNormal">0 saat</div></div>
+              <div class="data-pill"><div class="k">P.B.</div><div class="v" id="miniPB">0 saat</div></div>
+              <div class="data-pill"><div class="k">Toplam</div><div class="v" id="miniToplam">0 saat</div></div>
+            </div>
+          </div>
+          <div class="kpi-grid" style="margin-bottom:14px">
+            <div class="kpi"><div class="k">S.Ü.</div><div class="v" id="kpiBase">₺0,00</div></div>
+            <div class="kpi"><div class="k">E.Ü.</div><div class="v" id="kpiEmek">₺0,00</div></div>
+            <div class="kpi"><div class="k">Toplam Saatlik Ücret</div><div class="v" id="kpiHourly">₺0,00</div></div>
+            <div class="kpi"><div class="k">Esas Hizmet Yılı</div><div class="v" id="kpiServiceYears">0</div></div>
+          </div>
+          <div class="grid2 striped-grid">
+            <div class="field"><label>Normal Mesai (saat)</label><input id="normalMesai" type="number" step="0.01" value="0"></div>
+            <input id="ucretliIzin" type="hidden" value="0">
+            <div class="field"><label>Yıllık İzin (saat)</label><input id="yillikIzin" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>GMŞ Ücretli (saat)</label><input id="gmsUcretli" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Sendika TİS İzni (saat)</label><input id="sendikaTisIzin" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Ücretli Rapor (saat)</label><input id="ucretliRapor" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Hafta Sonu / P.B. (saat)</label><input id="haftaSonu" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>UBGT / Saat</label><input id="tatil" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>UBGT Fiili Çalışma / Saat</label><input id="ubgtFiiliSaat" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Hat Bakım Onarım (saat)</label><input id="hatBakimSaat" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Yemek / İaşe</label><input id="yemekGun" type="number" step="1" value="0"></div>
+            <div class="field"><label>Fazla Mesai (saat)</label><input id="fazlaMesai" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Fazla Mesai Oranı</label><select id="fmRate"><option value="75" selected>%75</option><option value="100">%100</option><option value="250">%250</option><option value="300">%300</option></select></div>
+            <div class="field"><label>GMŞ / Tayit %</label><select id="tayitPercent"><option value="22" selected>22</option><option value="24">24</option><option value="25">25</option></select></div>
+            <div class="field"><label>Birleştirilmiş Sosyal Yardım (Brüt)</label><input id="bsyGross" type="number" step="0.01" value="5551.84"></div>
+            <div class="field"><label>Denge Tazminatı (Brüt)</label><input id="dengeTazminati" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Engelli Vergi İndirimi (GV Dışı TL)</label><input id="disabledTaxExemption" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>GMŞ / Tayit Esas Saat</label><input id="tayitHours" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Vardiya Primi (saat)</label><input id="vardiyaSaat" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Vardiya Primi Oranı (%)</label><input id="vardiyaRate" type="number" step="0.01" value="10"></div>
+            <div class="field"><label>Gece Primi (saat)</label><input id="geceSaat" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Gece Primi Oranı (%)</label><input id="geceRate" type="number" step="0.01" value="15"></div>
+            <div class="field"><label>Km Tazminatı (saat)</label><input id="kmSaat" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Rampa Tazminatı (sefer)</label><input id="rampaSefer" type="number" step="1" min="0" value="0"></div>
+            <div class="field"><label>Manevra Tazminatı (saat)</label><input id="manevraSaat" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Bekleme Tazminatı / Bono</label><select id="beklemeGun"><option value="0" selected>Yok</option><option value="0.25">1/4 Bono · ₺215</option><option value="0.5">1/2 Bono · ₺430</option><option value="0.75">3/4 Bono · ₺645</option><option value="1">Tam Bono · ₺860</option></select></div>
+            <div class="field"><label>Bekleme Bono Adedi</label><input id="beklemeAdet" type="number" step="1" min="0" value="0"></div>
+            <input id="postabasi" type="hidden" value="0">
+            <input id="iaseBrut" type="hidden" value="328.07">
+            <div class="field"><label>Yurtiçi Seyahat / GV-SGK Dışı</label><input id="yurticiSefer" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Diğer SGK-GV-DV Dışı Tutar</label><input id="digerSgkDisi" type="number" step="0.01" value="0"></div>
+          </div>
+        </div>
+
+        <div id="step3" class="mobile-pane hidden">
+          <h3>Kesintiler</h3>
+          
+          <div class="grid2 striped-grid">
+            <div class="field"><label>Spor Aidatı</label><input id="sporAidati" type="number" step="0.01" value="10"></div>
+            <div class="field"><label>Lojman</label><input id="lojman" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>KDV'li Hizmet / ÖDYL / Diğer Özel Kesinti</label><input id="odylHizmeti" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Önceki / Yıllık GV Matrahı</label><input id="prevGvMatrah" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Önceki Ay İkramiye Aldınız mı?</label><select id="prevBonusReceived"><option value="hayir" selected>Hayır</option><option value="evet">Evet</option></select></div>
+            <div class="field"><label>Önceki Ay İkramiye Tipi</label><select id="prevBonusType"><option value="tisHalf" selected>Yarım İkramiye (97,5 saat)</option><option value="tisFull">Tam İkramiye (225 saat)</option><option value="manual">Manuel Tutar</option></select></div>
+            <div class="field"><label>Önceki Ay İkramiye SGK Matrahı</label><input id="prevBonusGross" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>Diğer Önceki SGK Matrahı</label><input id="prevSgkMatrah" type="number" step="0.01" value="0"></div>
+            <div class="field"><label>GV İstisnası</label><input id="gvIstisna" type="number" step="0.01" value="4211.33"></div>
+            <div class="field"><label>DV İstisnası</label><input id="dvIstisna" type="number" step="0.01" value="250.70"></div>
+            <input id="yemekSgkIst" type="hidden" value="300">
+            <input id="yemekGvIst" type="hidden" value="300">
+            <div class="field"><label>Vergi Yöntemi</label><select id="taxMethod"><option value="kumulatif">Kümülatif 2026</option><option value="manuel">Manuel GV Oranı</option></select></div>
+            <div class="field"><label>Manuel GV Oranı (%)</label><select id="manualGvRate"><option value="15">%15</option><option value="20" selected>%20</option><option value="27">%27</option><option value="35">%35</option></select></div>
+          </div>
+        </div>
+
+        <div id="step4" class="mobile-pane hidden">
+          <div class="summary" id="printSheet">
+            <div class="summary-head">
+              <div class="summary-company">
+                <img id="summaryLogo" src="images/summary_logo_default.png" alt="Kurum logosu">
+                <div>
+                  <div id="summaryCompany" style="font-size:12px;letter-spacing:.16em;color:#0369a1;text-transform:uppercase">TÜRASAŞ</div>
+                  <div class="summary-title-row">
+                    <div style="font-size:18px;font-weight:900;margin-top:4px">Maaş Bordrosu</div>
+                    <button class="info-trigger" type="button" data-info-toggle="summaryInfo" aria-label="Bordro bilgisi">!</button>
+                  </div>
+                  <div class="info-panel hidden" id="summaryInfo">Bu hesaplama bilgilendirme amaclidir.</div>
+                  <div id="summaryMeta" style="color:#64748b;margin-top:6px"></div>
+                  <div id="summaryName" style="font-weight:800;margin-top:4px"></div>
+                </div>
+              </div>
+              <div class="result-box">
+                <div class="k">Net Ödenecek</div>
+                <div class="v" id="netView">₺0,00</div>
+              </div>
+            </div>
+            <div class="official-payroll" id="officialPayrollContent"></div>
+            <div class="disclaimer inline-disclaimer" id="calcNote"></div>
+            <div class="summary-split">
+              <div class="sum-card income-card"><h4>Gelirler</h4><div id="gelirlerList"></div></div>
+              <div class="sum-card deduction-card"><h4>Kesintiler</h4><div id="kesintilerList"></div></div>
+            </div>
+            <div class="bottom-kpis">
+              <div class="kpi"><div class="k">SSK Matrahı</div><div class="v" id="primeBaseView">₺0,00</div></div>
+              <div class="kpi"><div class="k">GV Matrahı</div><div class="v" id="gvBaseView">₺0,00</div></div>
+              <div class="kpi"><div class="k">DV Matrahı</div><div class="v" id="dvBaseView">₺0,00</div></div>
+              <div class="kpi"><div class="k">Net Ödenecek</div><div class="v" id="netView2">₺0,00</div></div>
+            </div>
+            <div class="bottom-kpis kpi-grid compact3">
+              <div class="kpi"><div class="k">GV İstisnası</div><div class="v" id="gvIstisnaView">₺0,00</div></div>
+              <div class="kpi"><div class="k">DV İstisnası</div><div class="v" id="dvIstisnaView">₺0,00</div></div>
+              <div class="kpi"><div class="k">KM Vergi Muaf</div><div class="v" id="kmTaxExemptView">₺0,00</div></div>
+            </div>
+            <div class="action-row">
+              <div class="left"><button class="btn" id="pdfBtn">Excel İndir</button></div>
+              <div class="right"><button class="btn" id="pngBtn">PNG İndir</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sticky-nav">
+          <div class="sticky-wrap">
+            <button class="btn" id="prevBtn">Geri</button>
+            <button class="btn primary" id="nextBtn">İleri</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tedbPane" class="mobile-pane hidden">
+        <div class="tedb-box">
+          <div class="tedb-head">
+            <div class="section-head">
+              <h3>İkramiye ve İlave Tediye</h3>
+              <button class="info-trigger" type="button" data-info-toggle="tedbInfo" aria-label="İkramiye bilgisi">!</button>
+            </div>
+            <button class="btn primary" id="gotoMaasFromTedb">Maaş ekranına dön</button>
+          </div>
+          <div class="info-panel hidden" id="tedbInfo">Yarım ve tam ikramiye için hesap yapar. Aynı ay maaş alındıysa SGK ve işsizlik kesintisi bu ödemede yapılmaz; ikramiye matrahı sonraki maaş ayına SGK matrah devri olarak taşınır.</div>
+          <div class="tedb-mini">
+            <div class="mini"><div class="k">Kurum</div><div class="v" id="tedbCompany">TÜRASAŞ</div></div>
+            <div class="mini"><div class="k">Personel</div><div class="v" id="tedbPerson">-</div></div>
+            <div class="mini"><div class="k">Emek Dahil Saatlik</div><div class="v" id="tedbHourly">₺0,00</div></div>
+          </div>
+          <div class="tedb-controls">
+            <div class="grid2 striped-grid">
+              <div class="field">
+                <label>İkramiye Tipi</label>
+                <select id="tedbType">
+                  <option value="tisHalf">Yarım İkramiye (97,5 saat)</option>
+                  <option value="tisFull">Tam İkramiye (225 saat)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Aynı Ay İçinde Maaşı Aldınız mı?</label>
+                <select id="tedbSalaryPaid">
+                  <option value="evet" selected>Evet</option>
+                  <option value="hayir">Hayır</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Toplam GV Matrahı</label>
+                <input id="tedbPrevGvMatrah" type="number" step="0.01" value="0">
+              </div>
+              <div class="field">
+                <label>GV Hesaplama</label>
+                <select id="tedbTaxMethod">
+                  <option value="kumulatif" selected>Kümülatif 2026</option>
+                  <option value="manuel">Manuel GV Oranı</option>
+                </select>
+              </div>
+              <div class="field" id="tedbManualRateField" style="display:none">
+                <label>Manuel GV Oranı (%)</label>
+                <input id="tedbManualGvRate" type="number" step="0.01" value="20">
+              </div>
+            </div>
+          </div>
+          <div class="tedb-ref-grid">
+            <div class="mini"><div class="k">Yarım İkramiye</div><div class="v" id="tisHalf">₺0,00</div></div>
+            <div class="mini"><div class="k">Tam İkramiye</div><div class="v" id="tisFull">₺0,00</div></div>
+          </div>
+          <div class="tedb-selected">
+            <h4 id="tedbSelectedTitle">İkramiye / TEDİYE</h4>
+            <div class="big" id="tedbSelectedGross">₺0,00</div>
+            <div class="sub" id="tedbSelectedSub"></div>
+          </div>
+          <div class="summary-split tedb-summary">
+            <div class="sum-card income-card">
+              <h4>Gelirler</h4>
+              <div id="tedbGelirler"></div>
+            </div>
+            <div class="sum-card deduction-card">
+              <h4>Kesintiler</h4>
+              <div id="tedbKesintiler"></div>
+            </div>
+          </div>
+          <div class="sum-card">
+            <h4>Tablo</h4>
+            <table class="simple-table" id="tedbSimpleTable"></table>
+          </div>
+          <div class="kpi-grid compact3">
+            <div class="kpi"><div class="k">GV Matrahı</div><div class="v" id="tedbGvBase">₺0,00</div></div>
+            <div class="kpi"><div class="k">Toplam Kesinti</div><div class="v" id="tedbTotalDeduction">₺0,00</div></div>
+            <div class="kpi"><div class="k">Net Ödenen</div><div class="v" id="tedbNet">₺0,00</div></div>
+          </div>
+          <div class="tedb-note" id="tedbNote"></div>
+          <div class="action-row">
+            <div class="left"><button class="btn" id="tedbPdfBtn">Excel İndir</button></div>
+            <div class="right"><button class="btn" id="tedbPngBtn">PNG İndir</button></div>
+          </div>
+          <div class="summary print-sheet" id="tedbPrintSheet">
+            <div class="summary-head">
+              <div class="summary-company">
+                <img id="tedbPrintLogo" src="images/summary_logo_default.png" alt="Kurum logosu">
+                <div>
+                  <div class="name" id="tedbPrintCompany">TCDD</div>
+                  <div class="meta" id="tedbPrintMeta">İkramiye özeti</div>
+                </div>
+              </div>
+              <div class="result-box">
+                <div class="k">Net Ödenen</div>
+                <div class="v" id="tedbPrintNet">₺0,00</div>
+              </div>
+            </div>
+            <div class="sum-card">
+              <h4>Gelirler · Kesintiler · Net Ödenen</h4>
+              <table class="simple-table" id="tedbPrintTable"></table>
+            </div>
+            <div class="bottom-note" id="tedbPrintNote"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="work" class="section">
+    <div class="panel hero work-shell">
+      <div class="section-head hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">Çalışma Akışı</div>
+          <h2>Çalışma Takvimi</h2>
+        </div>
+      </div>
+      <div class="leave-topbar profile-topbar-compact">
+        <button class="personnel-summary-card compact-profile-card" id="openProfileDrawerWorkBtn" type="button" aria-label="Çalışma takvimi personel kartını aç">
+          <span class="personnel-summary-info" aria-hidden="true">i</span>
+          <span class="personnel-summary-head">
+            <span class="personnel-summary-icon person-icon" aria-hidden="true"></span>
+            <span class="k">Aktif Personel</span>
+          </span>
+          <span class="personnel-summary-copy">
+            <span class="personnel-summary-label">Personel No</span>
+            <strong class="personnel-summary-sicil" id="workActiveProfileSicil">-</strong>
+            <strong class="v" id="workActiveProfileTitle">Henüz personel seçilmedi</strong>
+            <span class="s" id="workActiveProfileMeta"></span>
+          </span>
+          <span class="personnel-summary-avatar-wrap">
+            <span class="profile-avatar-card-orbit"></span>
+            <span class="profile-avatar" id="workActiveProfileAvatar">TC</span>
+            <span class="profile-avatar-card-label">Personel Kartı</span>
+          </span>
+          <span class="personnel-summary-metrics">
+            <span>
+              <i class="metric-icon briefcase-icon" aria-hidden="true"></i>
+              <em>Meslek</em>
+              <strong id="workActiveProfileRole">-</strong>
+            </span>
+            <span>
+              <i class="metric-icon bars-icon" aria-hidden="true"></i>
+              <em>Derece</em>
+              <strong id="workActiveProfileDegree">-</strong>
+            </span>
+            <span>
+              <i class="metric-icon clock-icon" aria-hidden="true"></i>
+              <em>Çalışma</em>
+              <strong id="workActiveProfileSchedule">-</strong>
+            </span>
+          </span>
+        </button>
+      </div>
+      <div class="work-view-tabs" role="tablist" aria-label="Çalışma takvimi görünümü">
+        <button class="mode-btn active" id="workCalendarTabBtn" type="button" data-work-view="calendar">Takvim</button>
+        <button class="mode-btn" id="workModelsTabBtn" type="button" data-work-view="models">Modeller</button>
+      </div>
+      <div class="work-view-panel" id="workCalendarPanel">
+      <div class="form-shell leave-layout">
+        <div class="form-panel leave-calendar-panel">
+          <div class="section-head">
+            <h3>Aylık Çalışma Takvimi</h3>
+            <input id="workMonth" type="month" />
+          </div>
+          <div class="leave-weekdays" aria-hidden="true">
+            <span>Pzt</span><span>Sal</span><span>Çar</span><span>Per</span><span>Cum</span><span>Cmt</span><span>Paz</span>
+          </div>
+          <div class="leave-calendar-grid work-calendar-grid" id="workCalendarGrid"></div>
+        </div>
+        <div class="form-panel form-preview">
+          <div class="section-head">
+            <h3>Çalışma Kaydı</h3>
+          </div>
+           <div class="single-grid striped-single-grid">
+             <div class="field"><label>Başlangıç Tarihi</label><input id="workDate" type="date"></div>
+             <div class="field"><label>Bitiş Tarihi</label><input id="workEndDate" type="date"></div>
+             <div class="field"><label>Çalışma Tipi</label><select id="workType"><option value="normal">Normal Çalışma</option><option value="vardiyaSabah">Vardiyalı Çalışma - Sabah</option><option value="vardiyaAksam">Vardiyalı Çalışma - Akşam</option><option value="vardiyaGece">Vardiyalı Çalışma - Gece</option><option value="vardiya">Vardiya - Manuel</option><option value="haftaSonu">Hafta Sonu / P.B.</option><option value="tatil">Tatil</option><option value="ubgt">UBGT / Ulusal Bayram Genel Tatil</option><option value="yillikIzin">Yıllık İzin</option><option value="gmsUcretli">GMŞ Ücretli</option><option value="sendikaTisIzin">Sendika TİS İzni</option><option value="ucretliRapor">Ücretli Rapor</option></select></div>
+             <div class="field"><label>Başlangıç</label><input id="workStartTime" type="time" value="08:00"></div>
+             <div class="field"><label>Bitiş</label><input id="workEndTime" type="time" value="17:00"></div>
+            <div class="field work-advanced-field"><label>Yemek Başlangıç</label><input id="workMealStart" type="time" value="12:00"></div>
+            <div class="field work-advanced-field"><label>Yemek Bitiş</label><input id="workMealEnd" type="time" value="12:30"></div>
+            <div class="field"><label>Fazla Mesai (saat)</label><input id="workOvertimeHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>Gece Primi (saat)</label><input id="workNightHours" type="number" step="0.25" value="0"></div>
+             <div class="field work-advanced-field"><label>Hat Bakım (saat)</label><input id="workTrackHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>UBGT Fiili (saat)</label><input id="workUbgtHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>Bono / Bekleme</label><select id="workBeklemeGun"><option value="0">Yok</option><option value="1">Tam Bono</option><option value="0.75">3/4 Bono</option><option value="0.5">1/2 Bono</option><option value="0.25">1/4 Bono</option></select></div>
+             <div class="field"><label>Bono Adedi</label><input id="workBeklemeAdet" type="number" step="1" min="0" value="0"></div>
+             <div class="field"><label>Km Tazminatı (saat)</label><input id="workKmHours" type="number" step="0.25" value="0"></div>
+             <div class="field"><label>Rampa Tazminatı (sefer)</label><input id="workRampaSefer" type="number" step="1" min="0" value="0"></div>
+             <div class="field work-advanced-field"><label>Not</label><input id="workNote" type="text" placeholder="Örn: 15:00-23:00 vardiyası"></div>
+           </div>
+           <div class="work-range-hint" id="workRangeHint">Tek gün seçili.</div>
+           <div class="work-net-preview" id="workNetPreview">Net çalışma: 8,5 saat</div>
+           <div class="action-row">
+             <div class="left"><button class="btn primary" id="saveWorkLogBtn">Seçili Günlere İşle</button></div>
+             <div class="right"><button class="btn" id="clearWorkLogBtn">Temizle</button></div>
+           </div>
+          <div class="leave-kpi-grid work-kpi-grid">
+            <div class="leave-kpi"><div class="k">Normal</div><div class="v" id="workNormalHours">0 saat</div></div>
+            <div class="leave-kpi"><div class="k">P.B / Tatil</div><div class="v" id="workPbHours">0 saat</div></div>
+            <div class="leave-kpi"><div class="k">Toplam</div><div class="v" id="workTotalHours">0 saat</div></div>
+            <div class="leave-kpi"><div class="k">F. Mesai</div><div class="v" id="workOvertimeTotal">0 saat</div></div>
+          </div>
+          <div class="work-sync-note" id="workCalendarHint">Bu ay için kayıt yoksa maaş ekranı varsayılan takvim saatlerini kullanır.</div>
+        </div>
+      </div>
+      <div class="summary-split">
+        <div class="sum-card income-card">
+          <h4>Takvim Özeti</h4>
+          <div id="workMonthSummaryList"></div>
+        </div>
+        <div class="sum-card">
+          <h4>Seçili Aya Ait Çalışma Kayıtları</h4>
+          <div class="leave-record-list" id="workEventList"></div>
+        </div>
+      </div>
+      </div>
+      <div class="work-view-panel work-models-panel hidden" id="workModelsPanel">
+        <div class="form-panel work-model-hero">
+          <div>
+            <div class="home-kicker">PDF Şablonları</div>
+            <h3>Modeller</h3>
+          </div>
+        </div>
+        <div class="work-model-grid" id="workModelCards"></div>
+        <div class="form-panel work-model-preview-panel">
+          <div class="section-head">
+            <h3 id="workModelPreviewTitle">Seçili Model</h3>
+            <span class="work-panel-badge" id="workModelPreviewBadge">Çalışma Takvimi</span>
+          </div>
+          <div class="work-model-preview hidden" id="workModelPreview" aria-hidden="true"></div>
+          <div class="form-actions compact-actions">
+            <button class="btn primary small" id="downloadWorkModelPdfBtn" type="button">PDF İndir</button>
+            <button class="btn small" id="downloadWorkModelPngBtn" type="button">PNG İndir</button>
+          </div>
+          <div class="work-sync-note" id="workModelStatus">Model çıktısı seçili personel, ay ve çalışma takvimi kayıtlarından oluşturulur.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="leave" class="section">
+    <div class="panel hero leave-shell">
+      <div class="section-head hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">TİS İzin Takibi</div>
+          <h2>İzin</h2>
+        </div>
+      </div>
+      <div class="leave-topbar profile-topbar-compact">
+        <button class="personnel-summary-card compact-profile-card" id="openProfileDrawerLeaveBtn" type="button" aria-label="İzin personel kartını aç">
+          <span class="personnel-summary-info" aria-hidden="true">i</span>
+          <span class="personnel-summary-head">
+            <span class="personnel-summary-icon person-icon" aria-hidden="true"></span>
+            <span class="k">Aktif Personel</span>
+          </span>
+          <span class="personnel-summary-copy">
+            <span class="personnel-summary-label">Personel No</span>
+            <strong class="personnel-summary-sicil" id="leaveActiveProfileSicil">-</strong>
+            <strong class="v" id="leaveActiveProfileTitle">Henüz personel seçilmedi</strong>
+            <span class="s" id="leaveActiveProfileMeta"></span>
+          </span>
+          <span class="personnel-summary-avatar-wrap">
+            <span class="profile-avatar-card-orbit"></span>
+            <span class="profile-avatar" id="leaveActiveProfileAvatar">TC</span>
+            <span class="profile-avatar-card-label">Personel Kartı</span>
+          </span>
+          <span class="personnel-summary-metrics">
+            <span>
+              <i class="metric-icon briefcase-icon" aria-hidden="true"></i>
+              <em>Meslek</em>
+              <strong id="leaveActiveProfileRole">-</strong>
+            </span>
+            <span>
+              <i class="metric-icon bars-icon" aria-hidden="true"></i>
+              <em>Derece</em>
+              <strong id="leaveActiveProfileDegree">-</strong>
+            </span>
+            <span>
+              <i class="metric-icon clock-icon" aria-hidden="true"></i>
+              <em>Çalışma</em>
+              <strong id="leaveActiveProfileSchedule">-</strong>
+            </span>
+          </span>
+        </button>
+      </div>
+      <div class="form-shell leave-layout">
+        <div class="form-panel leave-calendar-panel">
+          <div class="section-head">
+            <h3>İzin Takvimi</h3>
+            <input id="izinMonth" type="month" />
+          </div>
+          <div class="leave-weekdays" aria-hidden="true">
+            <span>Pzt</span><span>Sal</span><span>Çar</span><span>Per</span><span>Cum</span><span>Cmt</span><span>Paz</span>
+          </div>
+          <div class="leave-calendar-grid" id="leaveCalendarGrid"></div>
+        </div>
+        <div class="form-panel form-preview">
+          <h3>İzin Kaydı</h3>
+          <div class="single-grid striped-single-grid">
+            <div class="field"><label>Başlangıç Tarihi</label><input id="leaveDate" type="date"></div>
+            <div class="field"><label>Bitiş Tarihi</label><input id="leaveEndDate" type="date"></div>
+            <div class="field"><label>İzin Tipi</label><select id="leaveType"><option value="annual">Yıllık İzin</option><option value="tis">Sendika TİS İzni</option></select></div>
+            <div class="field"><label>Süre</label><select id="leaveDuration"><option value="1">Tam Gün</option><option value="0.5">Yarım Gün</option></select></div>
+            <div class="field"><label>Not</label><input id="leaveNote" type="text" placeholder="Örn: Sağlık, aile, sevk"></div>
+          </div>
+          <div class="action-row">
+            <div class="left"><button class="btn primary" id="saveLeaveBtn">Takvime Ekle</button></div>
+            <div class="right"><button class="btn" id="clearLeaveFormBtn">Temizle</button></div>
+          </div>
+          <div class="leave-kpi-grid leave-balance-grid">
+            <div class="leave-kpi"><div class="k">Hizmet Yılı</div><div class="v" id="leaveServiceYears">0 yıl</div></div>
+            <div class="leave-kpi"><div class="k">Yıllık Hak</div><div class="v" id="leaveAnnualEntitlement">0 gün</div></div>
+            <div class="leave-kpi"><div class="k" id="leaveCarryLabel">Önceki Yıldan Devir</div><div class="v" id="leaveCarryOver">0 gün</div></div>
+            <div class="leave-kpi"><div class="k">Harcanan Yıllık</div><div class="v" id="leaveAnnualUsed">0 gün</div></div>
+            <div class="leave-kpi"><div class="k">Kalan Yıllık</div><div class="v" id="leaveAnnualRemaining">0 gün</div></div>
+            <div class="leave-kpi"><div class="k">Kalan Sendika TİS</div><div class="v" id="leaveTisRemaining">6 gün</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="summary-split">
+        <div class="sum-card income-card">
+          <h4>Toplam Harcanan</h4>
+          <div id="leaveSpentList"></div>
+        </div>
+        <div class="sum-card">
+          <h4 id="leaveRecordsTitle">Seçili Yıldaki Kayıtlar</h4>
+          <div class="leave-record-list" id="leaveEventList"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="form" class="section">
+    <div class="panel hero forum-panel">
+      <div class="section-head hero-head forum-hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">Demiryolcu Sosyal</div>
+          <h2>Forum Meydanı</h2>
+        </div>
+      </div>
+      <div class="forum-hero-stats">
+        <div><span id="forumHeroTopicCount">0</span><small>Başlık</small></div>
+        <div><span id="forumHeroReplyCount">0</span><small>Cevap</small></div>
+        <div><span id="forumHeroCategory">Tümü</span><small>Akış</small></div>
+      </div>
+      <div class="forum-category-rail" id="forumCategoryRail" aria-label="Forum kategori filtresi">
+        <button type="button" class="active" data-forum-category-filter="all" data-icon="TÜ" data-tone="sky"><span>Tümü</span></button>
+        <button type="button" data-forum-category-filter="gundem" data-icon="GN" data-tone="blue"><span>Gündem</span></button>
+        <button type="button" data-forum-category-filter="calisma" data-icon="ÇL" data-tone="teal"><span>Çalışma</span></button>
+        <button type="button" data-forum-category-filter="maas" data-icon="₺" data-tone="green"><span>Maaş</span></button>
+        <button type="button" data-forum-category-filter="sendika" data-icon="SN" data-tone="amber"><span>Sendika</span></button>
+        <button type="button" data-forum-category-filter="mevzuat" data-icon="MV" data-tone="indigo"><span>Mevzuat</span></button>
+        <button type="button" data-forum-category-filter="becayis" data-icon="BC" data-tone="orange"><span>Becayiş</span></button>
+        <button type="button" data-forum-category-filter="yardim" data-icon="?" data-tone="rose"><span>Yardım</span></button>
+      </div>
+      <div class="forum-status-card hidden" id="forumStatus">Forum yükleniyor...</div>
+      <div class="forum-compose">
+        <div class="field">
+          <label data-icon="KT">Kategori</label>
+          <select id="forumCategory">
+            <option value="gundem">Gündem</option>
+            <option value="calisma">Çalışma Düzeni</option>
+            <option value="maas">Maaş ve İkramiye</option>
+            <option value="sendika">Sendika</option>
+            <option value="mevzuat">Mevzuat</option>
+            <option value="becayis">Becayiş</option>
+            <option value="yardim">Yardım</option>
+          </select>
+        </div>
+        <div class="field forum-nick-field">
+          <label data-icon="NK">Forum Nick / Kullanıcı Adı</label>
+          <input id="forumNick" type="text" maxlength="32" placeholder="Örn: Makinist35">
+        </div>
+        <div class="field forum-title-field">
+          <label data-icon="BŞ">Konu Başlığı</label>
+          <input id="forumTitle" type="text" maxlength="120" placeholder="Başlığı kısa ve anlaşılır yaz">
+        </div>
+        <div class="field forum-body-field">
+          <label data-icon="MT">Konu Metni</label>
+          <textarea id="forumBody" maxlength="1800" placeholder="Sorunu, duyurunu veya deneyimini paylaş"></textarea>
+        </div>
+        <div class="forum-compose-actions">
+          <button class="btn primary" id="forumPublishBtn" type="button">Konu Aç</button>
+          <button class="btn" id="forumRefreshBtn" type="button">Yenile</button>
+        </div>
+      </div>
+      <div class="forum-workspace">
+        <div class="forum-board">
+          <div class="forum-board-head">
+            <div>
+              <span class="forum-strip-label">Konular</span>
+              <h3>Son Başlıklar</h3>
+            </div>
+            <span id="forumTopicCount">0 konu</span>
+          </div>
+          <div class="forum-topic-list" id="forumTopicList"></div>
+        </div>
+        <div class="forum-board forum-detail-board">
+          <div id="forumTopicDetail" class="forum-topic-detail"></div>
+          <div class="forum-reply-box">
+            <div class="field">
+              <label data-icon="CV">Cevap Yaz</label>
+              <textarea id="forumReplyBody" maxlength="1200" placeholder="Seçili konuya cevap yaz"></textarea>
+            </div>
+            <button class="btn primary" id="forumReplyBtn" type="button">Cevabı Gönder</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="social" class="section">
+    <div class="panel hero">
+      <div class="simple-grid">
+        <div class="simple-card social-card">
+          <h4>WhatsApp Haber Kanalı</h4>
+          <div style="margin-top:14px"><a class="pdf-link" href="https://whatsapp.com/channel/0029VacKgB1L2ATvVjxEEL38" rel="noopener noreferrer">Kanala Git</a></div>
+        </div>
+        <div class="simple-card social-card">
+          <h4>Facebook Sayfası</h4>
+          <div style="margin-top:14px"><a class="pdf-link" href="https://www.facebook.com/share/g/17QnUqCZBe/" rel="noopener noreferrer">Facebook Aç</a></div>
+        </div>
+        <div class="simple-card social-card">
+          <h4>Instagram Sayfası</h4>
+          <div style="margin-top:14px"><a class="pdf-link" href="https://www.instagram.com/demiryolisci/" rel="noopener noreferrer">Instagram Aç</a></div>
+        </div>
+        <div class="simple-card social-card">
+          <h4>X (Twitter) Hesabı</h4>
+          <div style="margin-top:14px"><a class="pdf-link" href="https://x.com/Demiryolisci" rel="noopener noreferrer">X Hesabını Aç</a></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="facilities" class="section">
+    <div class="panel hero facility-shell">
+      <div class="section-head hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">Konaklama ve Tesis Rehberi</div>
+          <h2>Misafirhaneler</h2>
+        </div>
+        <button class="info-trigger" type="button" data-info-toggle="facilityInfo" aria-label="Misafirhaneler bilgisi">!</button>
+      </div>
+      <div class="info-panel hidden" id="facilityInfo">TCDD ve DEMİRYOL-İŞ için paylaşılan tesis, misafirhane ve dinlenme alanları burada toplanır. Resmi telefon görünmeyen kayıtlarda destek iletişimi ayrıca gösterilir.</div>
+      <div class="facility-hero-strip">
+        <div class="facility-map-card">
+          <span class="facility-map-node tcdd">TCDD</span>
+          <span class="facility-map-line"></span>
+          <span class="facility-map-node union">DEMİRYOL-İŞ</span>
+        </div>
+        <div class="facility-source-card">
+          <strong>Tesis rehberi</strong>
+          <span>TCDD misafirhane/dinlenme tesisi kayıtları ve Demiryol-İş tesisleri tek ekranda toplandı.</span>
+          <div class="facility-source-links">
+            <a href="https://static.tcdd.gov.tr/webfiles/userfiles/files/duyuru/2024/2024misafir.pdf" target="_blank" rel="noopener">TCDD ücret duyurusu</a>
+            <a href="https://demiryolis.org.tr/tesislerimiz/" target="_blank" rel="noopener">Demiryol-İş tesisleri</a>
+          </div>
+        </div>
+      </div>
+      <div class="facility-kpi-grid">
+        <div class="facility-kpi">
+          <div class="k">Toplam Liste</div>
+          <div class="v" id="facilityTotalCount">0</div>
+        </div>
+        <div class="facility-kpi">
+          <div class="k">Aktif / Listelenen</div>
+          <div class="v" id="facilityActiveCount">0</div>
+        </div>
+        <div class="facility-kpi">
+          <div class="k">Kısıtlı / Kapalı</div>
+          <div class="v" id="facilityClosedCount">0</div>
+        </div>
+        <div class="facility-kpi">
+          <div class="k">Şehir Sayısı</div>
+          <div class="v" id="facilityCityCount">0</div>
+        </div>
+      </div>
+      <div class="facility-shell-grid">
+        <div class="form-panel">
+          <div class="section-head">
+            <h3>Aktif / Listelenenler</h3>
+            <div class="facility-inline-label">Tesis ve misafirhaneler</div>
+          </div>
+          <div class="facility-list" id="facilityActiveList"></div>
+        </div>
+        <div class="form-panel form-preview">
+          <div class="section-head">
+            <h3>Kısıtlı / Kapalı</h3>
+            <div class="facility-inline-label">Geçici / kalıcı durumlar</div>
+          </div>
+          <div class="facility-list" id="facilityClosedList"></div>
+        </div>
+      </div>
+      <div class="form-panel facility-support-panel">
+        <div class="section-head">
+          <h3>Destek İletişimi</h3>
+          <div class="facility-inline-label">Resmi görünmeyenler için yönlendirme</div>
+        </div>
+        <div class="simple-grid facility-contact-grid" id="facilitySupportList"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="exchange" class="section">
+    <div class="panel hero exchange-shell">
+      <div class="section-head hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">Becayiş Eşleşme Alanı</div>
+          <h2>Becayiş</h2>
+        </div>
+        <button class="info-trigger" type="button" data-info-toggle="exchangeInfo" aria-label="Becayiş bilgisi">!</button>
+      </div>
+      <div class="info-panel hidden" id="exchangeInfo">Becayiş eşleşmesi il bazlı çalışır: Sivas isteyen İzmirli ile, İzmir isteyen Sivaslı karşılıklı eşleşir. Bölge ve ilçe/birim bilgileri detay için tutulur; eşleşme hesabında ilçe dikkate alınmaz.</div>
+      <div class="exchange-visual-band" aria-label="Becayiş akışı">
+        <div class="exchange-flow-card from">
+          <span>1</span>
+          <strong>Mevcut Yer</strong>
+          <small>Bölge, il ve birim</small>
+        </div>
+        <div class="exchange-flow-rail"><i></i></div>
+        <div class="exchange-flow-card target">
+          <span>2</span>
+          <strong>Hedef Yer</strong>
+          <small>Talep edilen il</small>
+        </div>
+        <div class="exchange-flow-rail"><i></i></div>
+        <div class="exchange-flow-card match">
+          <span>3</span>
+          <strong>Eşleşme</strong>
+          <small>Karşılıklı il kontrolü</small>
+        </div>
+      </div>
+      <div class="form-shell exchange-layout">
+        <div class="form-panel exchange-form-panel">
+          <div class="exchange-hero-card">
+            <img src="images/badge_exchange.png" alt="Becayiş" />
+            <div>
+              <h3>Becayiş Talebi</h3>
+              <p>Bulunduğun bölge/il ve gitmek istediğin yeri yaz. Eşleşme sadece il üzerinden yapılır; ilçe ve birim bilgisi bildirim detayında gösterilir.</p>
+            </div>
+          </div>
+          <div class="exchange-trust-strip">
+            <span>İl bazlı arama</span>
+            <span>Üye iletişim kartı</span>
+            <span>Talep sahibi silebilir</span>
+          </div>
+          <div class="grid2 striped-grid exchange-field-grid">
+            <div class="field exchange-from"><label data-icon="ÇK">Mevcut Çalışma Bölgesi</label><select id="exchangeCurrentRegion"><option value="">Bölge seç</option></select></div>
+            <div class="field exchange-from"><label data-icon="İL">Bulunduğunuz İl</label><select id="exchangeCurrentCity"><option value="">İl seç</option></select></div>
+            <div class="field exchange-from"><label data-icon="BR">Mevcut İlçe / Birim</label><input id="exchangeCurrentDistrict" type="text" placeholder="Örn: Merkez"></div>
+            <div class="field exchange-to"><label data-icon="HB">Nakil / Becayiş Talep Edilen Bölge</label><select id="exchangeTargetRegion"><option value="">Bölge seç</option></select></div>
+            <div class="field exchange-to"><label data-icon="HN">Nakil / Becayiş Talep Edilen İl</label><select id="exchangeTargetCity"><option value="">İl seç</option></select></div>
+            <div class="field exchange-to"><label data-icon="GT">Gitmek İstenen İlçe / Birim</label><input id="exchangeTargetDistrict" type="text" placeholder="Örn: Halkapınar"></div>
+            <div class="field"><label data-icon="KR">Kurum</label><select id="exchangeCompany"><option value="TCDD">TCDD</option><option value="TCDD_TASIMACILIK">TCDD Taşımacılık</option><option value="TURASAS">TÜRASAŞ</option></select></div>
+            <div class="field"><label data-icon="GV">Görev / Ünvan</label><input id="exchangeRole" type="text" placeholder="Örn: Kaynakçı"></div>
+            <div class="field"><label data-icon="ÇT">Çalışma Tipi</label><select id="exchangeWorkType"><option value="normal">Normal</option><option value="vardiya">Vardiyalı</option><option value="tti">TTİ &amp; Makinist</option></select></div>
+            <div class="field"><label data-icon="BD">Bildirim Tercihi</label><select id="exchangeNotify"><option value="push">Uygulama bildirimi</option><option value="email">E-posta</option><option value="whatsapp">WhatsApp</option></select></div>
+            <div class="field"><label data-icon="TEL">Cep Telefonu</label><input id="exchangePhone" type="tel" autocomplete="tel" placeholder="05## ### ## ##"></div>
+            <div class="field"><label data-icon="EP">E-posta</label><input id="exchangeEmail" type="email" autocomplete="email" placeholder="abcd@gmail.com"></div>
+            <div class="field full"><label data-icon="NT">Kısa Not</label><input id="exchangeNote" type="text" placeholder="İsteğe bağlı not"></div>
+          </div>
+          <div class="form-actions">
+            <button class="btn" id="fillExchangeFromProfileBtn" type="button">Personelden Doldur</button>
+            <button class="btn primary" id="saveExchangeBtn" type="button">Becayiş Talebini Kaydet</button>
+            <button class="btn danger" id="deleteExchangeBtn" type="button">Talebi Sil</button>
+            <button class="btn" id="clearExchangeBtn" type="button">Temizle</button>
+          </div>
+          <div class="work-sync-note" id="exchangeStatus">Becayiş talebi kaydedildiğinde uygun eşleşme bilgisi burada görünecek.</div>
+        </div>
+        <div class="form-panel form-preview">
+          <div class="section-head">
+            <h3>Eşleşme Önizleme</h3>
+            <div class="facility-inline-label">Bildirim</div>
+          </div>
+          <div class="preview-list" id="exchangePreview"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="membership" class="section">
+    <div class="panel hero membership-shell auth-choice">
+      <div class="section-head hero-head">
+        <div class="forum-title-wrap">
+          <div class="home-kicker">KVKK ve Başvuru Akışı</div>
+          <h2>Üyelik</h2>
+        </div>
+      </div>
+
+      <div class="auth-gate-panel" id="authGatePanel">
+        <div class="auth-visual membership-entry-logo">
+          <img src="images/badge_membership.png" alt="Üyelik görseli">
+        </div>
+        <div class="auth-copy">
+          <div class="home-kicker">Güvenli Giriş</div>
+          <h3>Üyelik Kapısı</h3>
+          <p>Üye girişi yap veya yeni başvuru oluştur.</p>
+          <div class="auth-choice-row">
+            <button class="btn primary" id="showLoginBtn" type="button">Üye Girişi</button>
+            <button class="btn" id="showSignupBtn" type="button">Üye Ol</button>
+          </div>
+        </div>
+        <div class="auth-login-card" id="authLoginCard">
+          <div class="section-head">
+            <h3>Üye Girişi</h3>
+            <div class="facility-inline-label">Parolalı</div>
+          </div>
+          <div class="single-grid striped-single-grid">
+            <div class="field"><label>Sicil veya E-posta</label><input id="memberLoginSicil" type="text" autocomplete="username" placeholder="Sicil veya e-posta"></div>
+            <div class="field"><label>Parola</label><input id="memberLoginPassword" type="password" autocomplete="current-password" placeholder="Parola"></div>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" id="memberLoginBtn" type="button">Üye Girişi</button>
+            <button class="btn" id="memberLogoutBtn" type="button">Oturumu Kapat</button>
+          </div>
+          <div class="work-sync-note" id="memberLoginStatus">Üye girişi için onaylı başvuru ve parola gerekir.</div>
+          <div class="account-delete-card hidden" id="accountDeleteCard">
+            <div>
+              <strong>Hesap ve veri yönetimi</strong>
+              <span>Üyelik, personel kartı, izin/takvim ve becayiş kayıtlarını uygulama içinden veya web sitesindeki hesap silme sayfası üzerinden silebilirsin.</span>
+            </div>
+            <button class="btn danger small" id="deleteMyDataBtn" type="button">Tüm Verilerimi Sil</button>
+            <a href="https://www.demiryolcu.com.tr/hesap-silme" target="_blank" rel="noopener">Hesap silme bilgi sayfası</a>
+          </div>
+        </div>
+        <button class="btn soft guest-login-btn" id="guestLoginBtn" type="button">Misafir Girişi</button>
+      </div>
+
+      <div class="form-shell membership-layout">
+        <div class="form-panel membership-form-panel">
+          <div class="membership-signup-hero" id="membershipSignupHero">
+            <img src="images/badge_membership.png" alt="Üyelik başvurusu">
+            <div>
+              <div class="home-kicker">Üye Ol</div>
+              <h3>Başvuru Bilgileri</h3>
+            </div>
+          </div>
+          <div class="section-head">
+            <h3>Üye Başvurusu</h3>
+            <div class="facility-inline-label">Başvuru formu</div>
+          </div>
+          <div class="single-grid striped-single-grid">
+            <div class="field"><label>Ad Soyad</label><input id="memberFullName" type="text" placeholder="Ad soyad"></div>
+            <div class="field"><label>Sicil</label><input id="memberSicil" type="text" placeholder="Sicil numarası"></div>
+            <div class="field"><label>Bölge</label><select id="memberUnit">
+              <option value="">Bölge seç</option>
+              <option value="1. Bölge Müdürlüğü Haydarpaşa">1. Bölge Müdürlüğü Haydarpaşa</option>
+              <option value="2. Bölge Müdürlüğü Ankara">2. Bölge Müdürlüğü Ankara</option>
+              <option value="3. Bölge Müdürlüğü Alsancak">3. Bölge Müdürlüğü Alsancak</option>
+              <option value="4. Bölge Müdürlüğü Sivas">4. Bölge Müdürlüğü Sivas</option>
+              <option value="5. Bölge Müdürlüğü Malatya">5. Bölge Müdürlüğü Malatya</option>
+              <option value="6. Bölge Müdürlüğü Adana">6. Bölge Müdürlüğü Adana</option>
+              <option value="7. Bölge Müdürlüğü Afyonkarahisar">7. Bölge Müdürlüğü Afyonkarahisar</option>
+              <option value="8. YHT Bölge Müdürlüğü Ankara">8. YHT Bölge Müdürlüğü Ankara</option>
+              <option value="9. Bölge Müdürlüğü Erzurum">9. Bölge Müdürlüğü Erzurum</option>
+            </select></div>
+            <div class="field"><label>Kurum</label><select id="memberCompany"><option value="TCDD">TCDD</option><option value="TCDD_TASIMACILIK">TCDD Taşımacılık</option><option value="TURASAS">TÜRASAŞ</option></select></div>
+            <div class="field"><label>Üyelik Tipi</label><select id="memberType"><option value="standart">Standart Üye</option><option value="temsilci">Temsilci Adayı</option><option value="moderator">Moderatör Adayı</option></select></div>
+            <div class="field"><label>Görev / Ünvan</label><select id="memberRole">
+              <option value="">Görev seç</option>
+              <option>Döşemecilik / Terzilik</option>
+              <option>Sıcak ve Soğuk Metal Şekillendirmeciliği</option>
+              <option>Dökümcülük</option>
+              <option>Hassas ve Dakik Aletler Kullanımı ve Tamirciliği</option>
+              <option>Tezgah, Makine ve Talaşlı İmalat İşçiliği</option>
+              <option>Lokomotif Tamirciliği</option>
+              <option>Motor Tamirciliği</option>
+              <option>Mekanik Vasıta Tesis ve Cihaz Tamirciliği</option>
+              <option>Vagon İmal ve Tamirciliği</option>
+              <option>Kalorifer Su ve Sıhhi Tesisatçılık</option>
+              <option>Kaynakçılık</option>
+              <option>Akümülatörcülük / Elektroliz İşçiliği</option>
+              <option>Elektrikçilik</option>
+              <option>Yüksek Gerilim Tesisat İşçiliği / Katener</option>
+              <option>Mekanik, Elektrikli Sinyal ve Uzaktan Kumanda İşçiliği</option>
+              <option>Haberleşme Cihazları, Telekomünikasyon Havaihat ve Kablo İşçiliği</option>
+              <option>Ahşap İşlemeciliği ve Cam İşleri İşçiliği</option>
+              <option>Boyacılık</option>
+              <option>İnşaatçılık</option>
+              <option>Matbaacılık</option>
+              <option>Lastik ve Fiber Glasçılık İşçiliği</option>
+              <option>Armadörlük</option>
+              <option>Mekanik Vasıta Tesis, Cihaz ve Vinç Operatörlüğü</option>
+              <option>Demiryolu Yol Yapım, Bakım ve Onarım Makinesi Operatörü</option>
+              <option>Sanatsız İşçilik</option>
+              <option>Elektronik İşçiliği</option>
+              <option>Yol Bakım Onarım İşçiliği</option>
+              <option>Vasıta Sürücüsü</option>
+              <option>Makinist İşçiliği</option>
+              <option>Tren Teşkil İşçiliği</option>
+              <option>Vagon Muayene ve Bakım Onarım İşçiliği</option>
+              <option>İstasyon Operasyon İşçisi</option>
+              <option>Kent İçi Raylı Sistemler Trafik Kontrolörü</option>
+              <option>Mühendis İşçiliği</option>
+            </select></div>
+            <div class="field"><label>Şehir</label><input id="memberCity" type="text" placeholder="Şehir"></div>
+            <div class="field"><label>Telefon</label><input id="memberPhone" type="tel" placeholder="05xx xxx xx xx"></div>
+            <div class="field"><label>E-posta</label><input id="memberEmail" type="email" placeholder="ornek@posta.com"></div>
+            <div class="field"><label>Parola</label><input id="memberPassword" type="password" autocomplete="new-password" placeholder="En az 6 karakter"></div>
+            <div class="field"><label>Parola Tekrar</label><input id="memberPasswordConfirm" type="password" autocomplete="new-password" placeholder="Parolayı tekrar yaz"></div>
+            <div class="field"><label>Bildirim Kanalı</label><select id="memberNotifyChannel"><option value="push">Uygulama Bildirimi</option><option value="email">E-posta</option><option value="whatsapp">WhatsApp Duyurusu</option></select></div>
+            <div class="field"><label>Başvuru Notu</label><input id="memberNote" type="text" placeholder="İsteğe bağlı kısa not"></div>
+          </div>
+          <div class="form-actions compact-actions">
+            <button class="btn" id="fillMembershipFromProfileBtn" type="button">Personel Kartından Doldur</button>
+            <button class="btn" id="saveMembershipFormBtn" type="button">Taslağı Kaydet</button>
+            <button class="btn" id="clearMembershipFormBtn" type="button">Temizle</button>
+          </div>
+          <div class="form-panel compact-consent-panel">
+            <div class="section-head">
+              <h3>KVKK Aydınlatma ve Açık Rıza</h3>
+              <div class="facility-inline-label">Onay öncesi</div>
+            </div>
+            <div class="info-panel membership-kvkk-panel">
+              <strong>Kısa Bilgilendirme</strong>
+              <p>Üyelik, hesap yönetimi ve uygulama işlevleri için ad soyad, e-posta, telefon, sicil, kurum, görev, bölge/il, personel kartı, izin/takvim ve becayiş bilgileri işlenebilir.</p>
+              <p>Bu veriler hesap oluşturma, üyelik onayı, uygulama özelliklerine erişim, güvenlik ve kötüye kullanımı önleme amacıyla kullanılır. Kullanıcı verileri reklam veya pazarlama amacıyla üçüncü taraflarla paylaşılmaz.</p>
+              <div class="policy-link-row">
+                <a href="https://www.demiryolcu.com.tr/gizlilik-politikasi" target="_blank" rel="noopener">Gizlilik Politikası</a>
+                <a href="https://www.demiryolcu.com.tr/hesap-silme" target="_blank" rel="noopener">Hesap ve Veri Silme</a>
+              </div>
+            </div>
+            <div class="consent-list compact-consent-list">
+              <label class="consent-row"><input id="kvkkInfoRead" type="checkbox"> <span>KVKK aydınlatma metnini okudum.</span></label>
+              <label class="consent-row"><input id="kvkkConsent" type="checkbox"> <span>Üyelik başvurumun değerlendirilmesi için kişisel verilerimin işlenmesine açık rıza veriyorum.</span></label>
+              <label class="consent-row"><input id="contactConsent" type="checkbox"> <span>Başvurum hakkında telefon veya e-posta ile iletişime geçilmesini kabul ediyorum.</span></label>
+              <label class="consent-row"><input id="conductConsent" type="checkbox"> <span>Küfür, hakaret, küçük düşürücü ifade ve kişilik haklarını ihlal eden paylaşımlardan doğacak sorumluluğun bana ait olduğunu kabul ediyorum.</span></label>
+              <label class="consent-row optional"><input id="notifyConsent" type="checkbox"> <span>Uygulama duyuruları ve bilgilendirme bildirimleri için onay veriyorum. Bu alan isteğe bağlıdır.</span></label>
+            </div>
+          </div>
+          <div class="form-actions submit-actions">
+            <button class="btn primary" id="submitMembershipFormBtn" type="button">Onaya Gönder</button>
+          </div>
+          <div class="work-sync-note membership-user-notice" id="membershipUserNotice">İçeriklere giriş için üyelik başvurusu ve yönetim onayı gerekir.</div>
+        </div>
+
+        <div class="form-panel form-preview membership-preview-panel hidden" id="membershipStatusPanel">
+          <div class="status-row">
+            <h3>Başvuru Durumu</h3>
+            <span class="status-pill pending" id="membershipStatus">Taslak</span>
+          </div>
+          <div class="preview-list" id="membershipPreview"></div>
+          <div class="work-sync-note" id="membershipReviewMeta">Başvuru taslak olarak saklanır; onaya gönderildiğinde Firebase üyelik kuyruğuna iletilir ve yönetim onayından sonra giriş açılır.</div>
+        </div>
+      </div>
+
+      <div class="summary-split membership-bottom">
+        <div class="form-panel form-preview" id="membershipAdminPanelShell">
+          <div class="membership-admin-hero">
+            <img src="images/badge_management.png" alt="Yönetim paneli">
+            <div>
+              <div class="home-kicker">Yönetim</div>
+              <h3>Üye Kontrolü</h3>
+            </div>
+          </div>
+          <div class="membership-admin-area hidden" id="membershipAdminArea">
+            <div class="membership-admin-notice" id="membershipAdminNotice"></div>
+            <div class="form-actions compact-actions">
+              <button class="btn" id="refreshMembershipQueueBtn" type="button">Kuyruğu Yenile</button>
+              <button class="btn primary" id="showMemberListBtn" type="button">Üye Listesi</button>
+            </div>
+            <div class="section-head" style="margin-top:8px">
+              <h3>Onay Masası</h3>
+              <div class="facility-inline-label">Seçili kayıt</div>
+            </div>
+            <div class="membership-admin-summary" id="membershipAdminSummary"></div>
+            <div class="preview-list" id="membershipAdminPreview"></div>
+            <div class="membership-admin-actions">
+              <div class="membership-action-row membership-decision-row" id="membershipDecisionActions">
+                <button class="btn primary small" id="membershipApproveBtn" type="button">Onayla</button>
+                <button class="btn danger small" id="membershipRejectBtn" type="button">Reddet</button>
+              </div>
+              <div class="membership-action-row member-management-row" id="memberManagementActions">
+                <button class="btn danger small" id="membershipRemoveBtn" type="button">Kişiyi Çıkart</button>
+                <button class="btn good small" id="membershipMakeAdminBtn" type="button">Yönetici Yap</button>
+                <button class="btn soft small" id="membershipRemoveAdminBtn" type="button">Yöneticilikten Çıkart</button>
+              </div>
+            </div>
+            <div class="member-list-panel hidden" id="memberListPanel" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Üye Listesi">
+              <div class="section-head">
+                <h3>Üye Listesi</h3>
+                <div class="facility-inline-label" id="memberListCount">0 kayıt</div>
+              </div>
+              <button class="member-list-close" id="closeMemberListBtn" type="button" aria-label="Üye listesini kapat">Kapat</button>
+              <div class="single-grid striped-single-grid">
+                <div class="field"><label>Üye Ara</label><input id="memberListSearch" type="search" placeholder="Ad, soyad, bölge veya görev ara"></div>
+              </div>
+              <div class="member-list" id="memberListResults"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="notifications" class="section">
+    <div class="panel hero notification-shell">
+      <div class="membership-admin-hero notification-hero">
+        <img src="images/badge_management.png" alt="Bildirim paneli">
+        <div>
+          <div class="home-kicker">Yönetim</div>
+          <h3>Bildirim Paneli</h3>
+          <p>Platform duyurusu, uygulama push bildirimi ve WhatsApp paylaşımı buradan yönetilir.</p>
+        </div>
+      </div>
+      <div class="membership-admin-section notification-admin-card">
+        <h4>Bildirim / Güncel Duyuru</h4>
+        <div class="notification-command-grid" aria-label="Bildirim durumu">
+          <div class="notification-command-card app">
+            <span>Uygulama Push</span>
+            <strong id="notificationMetricPush">Hazır</strong>
+            <small>Kapalı uygulama için FCM kuyruğu</small>
+          </div>
+          <div class="notification-command-card platform">
+            <span>Platform Bildirileri</span>
+            <strong id="notificationMetricPlatform">0</strong>
+            <small>Anasayfa Güncel Duyurular</small>
+          </div>
+          <div class="notification-command-card tokens">
+            <span>Yüklü Cihaz</span>
+            <strong id="notificationMetricTokens">0</strong>
+            <small>Bildirim token kaydı</small>
+          </div>
+        </div>
+        <div class="single-grid striped-single-grid">
+          <div class="field"><label>Başlık</label><input id="notificationTitle" type="text" maxlength="90" placeholder="Duyuru başlığı"></div>
+          <div class="field"><label>Kısa Açıklama</label><input id="notificationBody" type="text" maxlength="240" placeholder="Kullanıcılara gösterilecek açıklama"></div>
+          <div class="field"><label>Bağlantı</label><input id="notificationHref" type="url" placeholder="İsteğe bağlı Facebook/web linki"></div>
+          <div class="field"><label>Etiket</label><input id="notificationLabel" type="text" maxlength="24" value="Duyuru"></div>
+          <div class="field"><label>Yayın Alanı</label><select id="notificationTarget"><option value="app_platform">Uygulama + Platform Bildirileri</option><option value="platform">Sadece Platform Bildirileri</option><option value="app">Sadece Uygulama Bildirimi</option></select></div>
+          <div class="field"><label>Alıcı Kitlesi</label><select id="notificationAudience"><option value="installed_members" selected>Uygulamayı Yükleyen Üyeler</option><option value="approved_members">Tüm Onaylı Üyeler</option><option value="admins">Yöneticiler</option></select></div>
+          <div class="field"><label>Bildirim Kanalı</label><select id="notificationChannel"><option value="both">Uygulama + WhatsApp</option><option value="app">Sadece Uygulama</option><option value="whatsapp">Sadece WhatsApp</option></select></div>
+          <div class="field"><label>Görsel URL</label><input id="notificationImageUrl" type="url" placeholder="İsteğe bağlı görsel bağlantısı"></div>
+          <div class="field"><label>Görsel Seç</label><input id="notificationImageFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></div>
+          <div class="field"><label>WhatsApp Metni</label><input id="notificationWhatsappText" type="text" maxlength="500" placeholder="Boş bırakılırsa başlık ve açıklama kullanılır"></div>
+          <input id="notificationEditingId" type="hidden">
+        </div>
+        <div class="notification-preview hidden" id="notificationImagePreview"></div>
+        <div class="form-actions compact-actions">
+          <button class="btn primary small" id="sendNotificationBtn" type="button">Yayınla ve Paylaş</button>
+          <button class="btn soft small hidden" id="cancelNotificationEditBtn" type="button">Düzenlemeyi İptal Et</button>
+          <button class="btn small" id="refreshAnnouncementsBtn" type="button">Duyuruları Yenile</button>
+          <button class="btn soft small hidden" id="openWhatsappShareBtn" type="button">WhatsApp Aç</button>
+        </div>
+        <div class="work-sync-note" id="notificationStatus">Duyurular seçilen yayın alanına göre anasayfa Platform Bildirileri alanına ve yüklü üye cihazlarının FCM push kuyruğuna eklenir. WhatsApp için paylaşım penceresi açılır.</div>
+        <div class="preview-list" id="notificationHistory"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-sign">© 2026 TCDD İşçi Platformu<br><span>Hazırlayan: Seçkin Çağlayan</span></div>
+  <nav class="site-footer-links" aria-label="Yasal bağlantılar">
+    <a href="https://www.demiryolcu.com.tr/gizlilik-politikasi" target="_blank" rel="noopener">Gizlilik Politikası</a>
+    <a href="https://www.demiryolcu.com.tr/hesap-silme" target="_blank" rel="noopener">Hesap Silme</a>
+  </nav>
+</footer>
+
+<a class="floating-whatsapp-contact" href="https://wa.me/905322774019" target="_blank" rel="noopener" aria-label="WhatsApp admin iletişim">
+  <img src="images/admin_contact.png" alt="Admin iletişim">
+</a>
+
+<div class="image-preview-modal hidden" id="imagePreviewModal" role="dialog" aria-modal="true" aria-label="Görsel önizleme">
+  <div class="image-preview-shell">
+    <div class="image-preview-head">
+      <strong id="imagePreviewCaption">Görsel</strong>
+      <button class="member-list-close" id="imagePreviewCloseBtn" type="button" aria-label="Görsel önizlemeyi kapat">Kapat</button>
+    </div>
+    <div class="image-preview-stage" id="imagePreviewStage">
+      <img id="imagePreviewImg" alt="Önizleme">
+    </div>
+    <div class="image-preview-foot">
+      <a id="imagePreviewOpenLink" href="#" target="_blank" rel="noopener">Yeni sekmede aç</a>
+    </div>
+  </div>
+</div>
+
+<div class="announcement-welcome hidden" id="announcementWelcome" role="dialog" aria-modal="false" aria-live="polite">
+  <div class="announcement-welcome-card">
+    <button class="announcement-welcome-close" id="announcementWelcomeCloseBtn" type="button" aria-label="Duyuruyu kapat">×</button>
+    <div class="announcement-welcome-kicker" id="announcementWelcomeLabel">Yeni Duyuru</div>
+    <img class="announcement-welcome-image hidden" id="announcementWelcomeImage" alt="">
+    <strong id="announcementWelcomeTitle">Hoş geldiniz</strong>
+    <span id="announcementWelcomeBody">Yeni duyuru yayınlandı.</span>
+    <a class="announcement-welcome-link hidden" id="announcementWelcomeLink" target="_blank" rel="noopener noreferrer">Duyuruyu Aç</a>
+  </div>
+</div>
+
+
+
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js" defer></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js" defer></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js" defer></script>
+<script src="firebase-web.js" defer></script>
+<script src="data.js" defer></script>
+<script src="railwayFacilities.js" defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>
